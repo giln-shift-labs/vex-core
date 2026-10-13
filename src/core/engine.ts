@@ -133,6 +133,10 @@ export class Vex {
   // NOT NULL can break the other's inserts. registerPlugin fails loudly
   // on collision using this map.
   private tableOwners: Map<string, string> = new Map();
+  // Previous table names claimed through `renamedFrom`, by plugin, keyed
+  // in lowercase because the rename matches table names case-insensitively.
+  // A rename must not take a table that another registration still uses.
+  private previousNameOwners: Map<string, string> = new Map();
   private middleware: MiddlewareFn[] = [];
   // Row-level access policies by table (core/access.ts). Applied to
   // every query-context read; mutation contexts are the trusted tier.
@@ -236,6 +240,23 @@ export class Vex {
             `now re-registered by plugin "${plugin.name}". ` +
             `Rename one of them (table names are not namespaced by plugin).`,
         );
+      }
+      const renamer = this.previousNameOwners.get(tableName.toLowerCase());
+      if (renamer) {
+        throw new Error(
+          `Table "${tableName}" is the previous name of a table in plugin "${renamer}".`,
+        );
+      }
+      const previous = schema.renamedFrom;
+      if (previous !== undefined) {
+        const key = previous.toLowerCase();
+        const inUse = [...this.tables].some((t) => t.toLowerCase() === key);
+        if (inUse || this.previousNameOwners.has(key)) {
+          throw new Error(
+            `Table "${tableName}" cannot be renamed from "${previous}": that name is still in use.`,
+          );
+        }
+        this.previousNameOwners.set(key, plugin.name);
       }
       this.tableOwners.set(tableName, plugin.name);
       this.tables.add(tableName);

@@ -49,6 +49,24 @@ const unsub = await vex.subscribe("counter.list", {}, (rows) => {
 });
 ```
 
+## Renaming tables and columns
+
+`registerTable` creates and migrates tables on startup. To rename instead of starting over, name the previous table or column with `renamedFrom`:
+
+```ts
+api.registerTable("tasks", {
+  renamedFrom: "todos",
+  columns: {
+    title: { type: "string", renamedFrom: "text" },
+    done: { type: "boolean" },
+  },
+});
+```
+
+If only the old name exists, it is renamed in place and its data stays. If only the new name exists, the rename already happened and nothing changes. If both or neither exist, startup fails rather than guess. The rename runs inside the same savepoint as the rest of the migration, so a later failure rolls it back. Leaving `renamedFrom` in place afterwards is harmless.
+
+A database renamed this way is not readable by an older build, which looks for the old names; restore a backup instead of rolling back.
+
 ## Reactive safety
 
 Explicit `query()` calls may return large results. `subscribe()` calls may not: reactive queries are re-run after writes, hashed, and delivered to callbacks, so Vex enforces row and byte budgets before accepting or continuing a subscription.

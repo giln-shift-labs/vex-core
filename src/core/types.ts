@@ -8,12 +8,24 @@ export interface ColumnDef {
   index?: boolean;
   optional?: boolean;
   default?: any;
+  /**
+   * The column's previous name. If the table has a column by that name
+   * and none by this one, it is renamed in place, keeping its data. If
+   * the table has neither, the migration fails.
+   */
+  renamedFrom?: string;
 }
 
 export interface TableSchema {
   columns: Record<string, ColumnDef>;
   indexes?: [name: string, columns: string[]][];
   unique?: string[][];
+  /**
+   * The table's previous name. If a table by that name exists and none
+   * by this one, it is renamed in place, keeping its rows. If neither
+   * exists, the migration fails.
+   */
+  renamedFrom?: string;
   /**
    * Row-level access policy (see core/access.ts). When present, every
    * query-context read of this table is filtered to the rows the

@@ -188,6 +188,108 @@ function validateTableNameAvailability(db: Database, name: string): void {
   }
 }
 
+function existingTableName(db: Database, name: string): string | null {
+  const row = db
+    .prepare(
+      "SELECT name FROM sqlite_master WHERE type = 'table' AND lower(name) = lower(?) LIMIT 1",
+    )
+    .get(name) as { name: string } | null;
+  return row?.name ?? null;
+}
+
+function validateRenames(name: string, schema: TableSchema): void {
+  if (
+    schema.renamedFrom !== undefined &&
+    schema.renamedFrom.toLowerCase() === name.toLowerCase()
+  ) {
+    throw new Error(`table ${quoteIdent(name)} cannot be renamed from itself`);
+  }
+  const declared = new Set(
+    Object.keys(schema.columns).map((col) => col.toLowerCase()),
+  );
+  const sources = new Set<string>();
+  for (const [colName, colDef] of Object.entries(schema.columns)) {
+    if (colDef.renamedFrom === undefined) continue;
+    const from = colDef.renamedFrom.toLowerCase();
+    if (from === "_id") {
+      throw new Error(
+        `reserved column name ${quoteIdent(colDef.renamedFrom)} cannot be renamed on table ${quoteIdent(name)}`,
+      );
+    }
+    if (declared.has(from) || sources.has(from)) {
+      throw new Error(
+        `ambiguous rename of ${quoteIdent(colDef.renamedFrom)} to ${quoteIdent(colName)} on table ${quoteIdent(name)}`,
+      );
+    }
+    sources.add(from);
+  }
+}
+
+function renameTableIfNeeded(
+  db: Database,
+  name: string,
+  schema: TableSchema,
+): void {
+  if (schema.renamedFrom === undefined) return;
+  const from = existingTableName(db, schema.renamedFrom);
+  const current = existingTableName(db, name);
+  if (from && current) {
+    throw new Error(
+      `cannot rename table ${quoteIdent(from)} to ${quoteIdent(name)}: both tables exist`,
+    );
+  }
+  if (!from && !current) {
+    throw new Error(
+      `cannot rename table ${quoteIdent(schema.renamedFrom)} to ${quoteIdent(name)}: neither table exists`,
+    );
+  }
+  if (!from) return;
+  db.exec(`ALTER TABLE ${quoteIdent(from)} RENAME TO ${quoteIdent(name)}`);
+  // The index step below drops the old table's generated indexes and
+  // creates them under the new name once their records follow the table.
+  db.prepare(
+    `UPDATE ${quoteIdent(SQLITE_INDEX_METADATA_TABLE)} SET "table" = ? WHERE "table" = ?`,
+  ).run(name, from);
+}
+
+function renameColumnsIfNeeded(
+  db: Database,
+  name: string,
+  schema: TableSchema,
+): void {
+  const renames = Object.entries(schema.columns).flatMap(([colName, colDef]) =>
+    colDef.renamedFrom === undefined
+      ? []
+      : [[colName, colDef.renamedFrom] as const],
+  );
+  if (renames.length === 0) return;
+  const columns = (
+    db.prepare(`PRAGMA table_info(${quoteIdent(name)})`).all() as {
+      name: string;
+    }[]
+  ).map((col) => col.name);
+  const existingColumn = (col: string) =>
+    columns.find((c) => c.toLowerCase() === col.toLowerCase());
+  for (const [colName, renamedFrom] of renames) {
+    const from = existingColumn(renamedFrom);
+    const current = existingColumn(colName);
+    if (from && current) {
+      throw new Error(
+        `cannot rename column ${quoteIdent(from)} to ${quoteIdent(colName)} on table ${quoteIdent(name)}: both columns exist`,
+      );
+    }
+    if (!from && !current) {
+      throw new Error(
+        `cannot rename column ${quoteIdent(renamedFrom)} to ${quoteIdent(colName)} on table ${quoteIdent(name)}: neither column exists`,
+      );
+    }
+    if (!from) continue;
+    db.exec(
+      `ALTER TABLE ${quoteIdent(name)} RENAME COLUMN ${quoteIdent(from)} TO ${quoteIdent(colName)}`,
+    );
+  }
+}
+
 function validateColumns(name: string, schema: TableSchema): void {
   const columnNames = new Set<string>();
   for (const colName of Object.keys(schema.columns)) {
@@ -692,20 +794,26 @@ export function sqliteAdapter(
       validateTableName(name);
       validateTableNameAvailability(db, name);
       validateColumns(name, schema);
+      validateRenames(name, schema);
       validateIndexColumns(name, schema);
       const expectedIndexes = expectedIndexDefinitions(name, schema);
-      validateIndexNameAvailability(db, name, expectedIndexes);
       db.exec("SAVEPOINT __vex_ensure_table");
       try {
+        db.exec(
+          'CREATE TABLE IF NOT EXISTS "__vex_sqlite_indexes" ("table" TEXT NOT NULL, "name" TEXT NOT NULL, PRIMARY KEY ("table", "name"))',
+        );
+        // Renames run first so every later step sees the new names. Until
+        // the table is renamed, its explicit indexes count as another
+        // table's, so index names are checked after it.
+        renameTableIfNeeded(db, name, schema);
+        validateIndexNameAvailability(db, name, expectedIndexes);
         db.exec(
           createTableSql(name, schema).replace(
             "CREATE TABLE",
             "CREATE TABLE IF NOT EXISTS",
           ),
         );
-        db.exec(
-          'CREATE TABLE IF NOT EXISTS "__vex_sqlite_indexes" ("table" TEXT NOT NULL, "name" TEXT NOT NULL, PRIMARY KEY ("table", "name"))',
-        );
+        renameColumnsIfNeeded(db, name, schema);
 
         // Migrate: add missing columns
         let existing = db

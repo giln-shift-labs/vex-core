@@ -694,6 +694,40 @@ describe("plugin name collisions", () => {
     ).rejects.toThrow('Duplicate table "runs"');
   });
 
+  test("a previous name cannot be a table that is still in use", async () => {
+    const plugin =
+      (name: string, table: string, renamedFrom?: string) =>
+      (api: VexPluginAPI) => {
+        api.setName(name);
+        api.registerTable(table, {
+          renamedFrom,
+          columns: { name: { type: "string" } },
+        });
+      };
+    const create = (...plugins: Array<(api: VexPluginAPI) => void>) =>
+      Vex.create({ plugins, storage: sqliteAdapter(":memory:") });
+
+    await expect(
+      create(plugin("a", "old_items"), plugin("b", "items", "old_items")),
+    ).rejects.toThrow("that name is still in use");
+    await expect(
+      create(plugin("a", "old_items"), plugin("b", "items", "OLD_ITEMS")),
+    ).rejects.toThrow("that name is still in use");
+    const renamed = sqliteAdapter(":memory:");
+    await renamed.ensureTable("old_items", {
+      columns: { name: { type: "string" } },
+    });
+    await expect(
+      Vex.create({
+        plugins: [plugin("b", "items", "old_items"), plugin("a", "Old_Items")],
+        storage: renamed,
+      }),
+    ).rejects.toThrow("is the previous name of a table");
+    await expect(create(plugin("a", "jobs", "_jobs"))).rejects.toThrow(
+      "that name is still in use",
+    );
+  });
+
   test("same name across different plugins is fine", async () => {
     const mvex = await Vex.create({
       plugins: [
