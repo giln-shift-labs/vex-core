@@ -1,4 +1,4 @@
-import { ArgsError, shownValue } from "../core/args-error.js";
+import { aggregate, rowCount, sortDirection } from "../core/args-error.js";
 import { serializeValue } from "../core/sql-value.js";
 import { buildWhereClause, quoteIdent } from "../core/sql-where.js";
 import type {
@@ -59,42 +59,21 @@ export function deserializeRow(
   return row;
 }
 
-const DIRECTIONS: Readonly<Record<string, string>> = {
-  asc: "ASC",
-  desc: "DESC",
-};
-
-function rowCount(name: "limit" | "offset", n: unknown): number {
-  if (typeof n === "number" && Number.isSafeInteger(n) && n >= 0) return n;
-  throw new ArgsError(
-    `${name} must be a non-negative safe integer; got ${shownValue(n)}`,
-  );
-}
-
 /**
  * A read's ORDER BY, LIMIT and OFFSET, the one place every builder
- * writes them: the direction becomes exactly ASC or DESC, the counts
- * non-negative safe integers, and any other value is an ArgsError,
- * whatever its type said. An offset without a limit reads past it
- * with `LIMIT -1`, SQLite's no limit.
+ * writes them, each value checked as it is written (an ArgsError
+ * otherwise, whatever its type said). An offset without a limit reads
+ * past it with `LIMIT -1`, SQLite's no limit.
  */
 function windowSql(
-  order: { column: string; dir: unknown } | null,
+  orderCol: string | null,
+  orderDir: unknown,
   limit: unknown,
   offset: unknown,
 ): string {
   let sql = "";
-  if (order) {
-    const dir =
-      typeof order.dir === "string" && Object.hasOwn(DIRECTIONS, order.dir)
-        ? DIRECTIONS[order.dir]
-        : null;
-    if (dir === null) {
-      throw new ArgsError(
-        `A sort direction must be "asc" or "desc"; got ${shownValue(order.dir)}`,
-      );
-    }
-    sql += ` ORDER BY ${quoteIdent(order.column)} ${dir}`;
+  if (orderCol) {
+    sql += ` ORDER BY ${quoteIdent(orderCol)} ${sortDirection(orderDir)}`;
   }
   if (limit !== null) sql += ` LIMIT ${rowCount("limit", limit)}`;
   if (offset !== null) {
@@ -120,10 +99,6 @@ export function createQueryBuilder(exec: DbExec, table: string): QueryBuilder {
   let limitN: number | null = null;
   let offsetN: number | null = null;
 
-  function orderBy() {
-    return orderCol ? { column: orderCol, dir: orderDir } : null;
-  }
-
   function buildSql(countOnly = false): { sql: string; params: any[] } {
     const { sql: where, params } = buildWhereClause(filters);
     const select = countOnly
@@ -132,7 +107,7 @@ export function createQueryBuilder(exec: DbExec, table: string): QueryBuilder {
         ? selectCols.map((c) => quoteIdent(c)).join(", ")
         : "*";
     let sql = `SELECT ${select} FROM ${quoteIdent(table)} ${where}`;
-    if (!countOnly) sql += windowSql(orderBy(), limitN, offsetN);
+    if (!countOnly) sql += windowSql(orderCol, orderDir, limitN, offsetN);
     return { sql, params };
   }
 
@@ -185,7 +160,7 @@ export function createQueryBuilder(exec: DbExec, table: string): QueryBuilder {
     },
     async distinct(column: string): Promise<any[]> {
       const { sql: where, params } = buildWhereClause(filters);
-      const sql = `SELECT DISTINCT ${quoteIdent(column)} FROM ${quoteIdent(table)} ${where}${windowSql(orderBy(), limitN, offsetN)}`;
+      const sql = `SELECT DISTINCT ${quoteIdent(column)} FROM ${quoteIdent(table)} ${where}${windowSql(orderCol, orderDir, limitN, offsetN)}`;
       const rows = await exec.all(sql, params);
       return rows.map(
         (r) => deserializeRow(r, exec.schemas.get(table))[column],
@@ -253,7 +228,9 @@ export function createQueryBuilder(exec: DbExec, table: string): QueryBuilder {
 
 function buildAggSelect(aggs: Record<string, AggDef>): string[] {
   const selects: string[] = [];
-  for (const [alias, def] of Object.entries(aggs)) {
+  for (const [alias, unchecked] of Object.entries(aggs)) {
+    // The function is written into the SQL as text.
+    const def = aggregate(unchecked);
     if (def === "count") {
       selects.push(`COUNT(*) as ${quoteIdent(alias)}`);
     } else {
@@ -299,11 +276,7 @@ function createGroupByBuilder(
       sql += ` HAVING ${having.slice("WHERE ".length)}`;
       params.push(...havingParams);
     }
-    sql += windowSql(
-      orderCol ? { column: orderCol, dir: orderDir } : null,
-      limitN,
-      null,
-    );
+    sql += windowSql(orderCol, orderDir, limitN, null);
     return exec
       .all(sql, params)
       .then((rows) =>
