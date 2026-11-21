@@ -5,26 +5,13 @@
  * filter means to the letter.
  */
 
-import { ArgsError, shownValue } from "./args-error.js";
+import { checkedFilter, filterGroups, identifier } from "./args-error.js";
 import { serializeValue } from "./sql-value.js";
 import type { Condition, Filter } from "./types.js";
 
-/**
- * The operators a filter may name. The operator is written into the
- * SQL as text, so anything else is refused, whatever its type said.
- */
-const OPERATORS: ReadonlySet<unknown> = new Set<Filter["operator"]>([
-  "=",
-  "!=",
-  "<",
-  ">",
-  "<=",
-  ">=",
-  "IN",
-]);
-
+/** A name as a quoted SQL identifier; see {@link identifier}. */
 export function quoteIdent(name: string): string {
-  return `"${name.replaceAll('"', '""')}"`;
+  return `"${identifier(name).replaceAll('"', '""')}"`;
 }
 
 /**
@@ -33,9 +20,17 @@ export function quoteIdent(name: string): string {
  * every row).
  */
 function conditionSql(condition: Condition, params: any[]): string {
-  if (!("any" in condition)) return filterSql(condition, params);
-  if (condition.any.length === 0) return "0 = 1";
-  const groups = condition.any.map((group) =>
+  // filterSql refuses whatever is neither shape.
+  if (
+    condition === null ||
+    typeof condition !== "object" ||
+    !("any" in condition)
+  ) {
+    return filterSql(condition as Filter, params);
+  }
+  const any = filterGroups(condition.any);
+  if (any.length === 0) return "0 = 1";
+  const groups = any.map((group) =>
     group.length === 0
       ? "1 = 1"
       : `(${group.map((f) => filterSql(f, params)).join(" AND ")})`,
@@ -54,14 +49,12 @@ export function buildWhereClause(filters: readonly Condition[]): {
 }
 
 /** One filter's SQL, its parameters appended to `params`. */
-function filterSql(f: Filter, params: any[]): string {
-  if (!OPERATORS.has(f.operator)) {
-    throw new ArgsError(
-      `A filter's operator must be one of ${[...OPERATORS].join(" ")}; got ${shownValue(f.operator)}`,
-    );
-  }
+function filterSql(unchecked: Filter, params: any[]): string {
+  // Its column and operator are written into the SQL as text.
+  const f = checkedFilter(unchecked);
+  const { operator } = f;
   const column = quoteIdent(f.column);
-  if (f.operator === "IN") {
+  if (operator === "IN") {
     const values = (Array.isArray(f.value) ? f.value : [f.value]).map(
       serializeValue,
     );
@@ -77,8 +70,8 @@ function filterSql(f: Filter, params: any[]): string {
     return clauses.length > 0 ? `(${clauses.join(" OR ")})` : "0 = 1";
   }
   const value = serializeValue(f.value);
-  if (value === null && f.operator === "=") return `${column} IS NULL`;
-  if (value === null && f.operator === "!=") return `${column} IS NOT NULL`;
+  if (value === null && operator === "=") return `${column} IS NULL`;
+  if (value === null && operator === "!=") return `${column} IS NOT NULL`;
   params.push(value);
-  return `${column} ${f.operator} ?`;
+  return `${column} ${operator} ?`;
 }

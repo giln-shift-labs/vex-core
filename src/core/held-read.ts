@@ -1,6 +1,7 @@
+import { ArgsError } from "./args-error.js";
 import { leadingSqlKeyword, sqlAfterLeadingComments } from "./sql-text.js";
 import { buildWhereClause, quoteIdent } from "./sql-where.js";
-import type { Hold } from "./types.js";
+import type { Filter, Hold } from "./types.js";
 
 /**
  * A raw read held to rows: the statement rewritten so that, inside
@@ -39,9 +40,7 @@ export function holdStatement(
         `sqlOver cannot hold ${JSON.stringify(table)}: the statement names it under its schema`,
       );
     }
-    const { where: filters, reads } = Array.isArray(hold)
-      ? { where: hold, reads: null }
-      : hold;
+    const { where: filters, reads } = heldTo(hold);
     const where = buildWhereClause(filters);
     // The row id rides along: what a result is told apart by.
     const columns = reads
@@ -72,4 +71,23 @@ function qualified(table: string): RegExp {
   const spelled = (word: string) =>
     `(?:"${word}"|\\[${word}\\]|\`${word}\`|\\b${word}\\b)`;
   return new RegExp(`${spelled("main")}\\s*\\.\\s*${spelled(name)}`, "i");
+}
+
+/**
+ * A hold as its filters and the columns it reads (null for every
+ * column): an array of filters, or `{ where, reads }`.
+ */
+function heldTo(hold: unknown): { where: Filter[]; reads: string[] | null } {
+  if (Array.isArray(hold)) return { where: hold, reads: null };
+  if (
+    hold !== null &&
+    typeof hold === "object" &&
+    Array.isArray((hold as any).where) &&
+    Array.isArray((hold as any).reads)
+  ) {
+    return hold as { where: Filter[]; reads: string[] };
+  }
+  throw new ArgsError(
+    "A hold is an array of filters or { where: filters, reads: columns }",
+  );
 }

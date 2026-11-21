@@ -9,6 +9,14 @@ import { AfterCommitRunner, nextTurn } from "./after-commit.js";
 import type { PluginFunction } from "./api.js";
 import { resolvePlugin } from "./api.js";
 import {
+  ArgsError,
+  checkedFilter,
+  filterGroups,
+  plainObject,
+  readableTable,
+  shownValue,
+} from "./args-error.js";
+import {
   type Evaluation,
   type EvaluationOptions,
   EvaluationPool,
@@ -1064,7 +1072,8 @@ export class Vex<A = unknown> implements VexCalls {
     }
     ctx = {
       db: {
-        table(name: string) {
+        table(unchecked: string) {
+          const name = readableTable(unchecked);
           const policy = self.accessPolicies.get(name);
           if (!policy) return baseBuilder(name);
           return guardQueryBuilder(name, baseBuilder(name), policy, () =>
@@ -1152,8 +1161,11 @@ export class Vex<A = unknown> implements VexCalls {
         ...descriptor,
         ...(reads ? { reads } : {}),
       });
+    // What it records is filed and judged against writes, so a filter
+    // is checked as the builder will check it before it is recorded.
     const tracked: QueryBuilder = {
       where(column, operator, value) {
+        checkedFilter({ column, operator, value });
         current = current.where(column, operator, value);
         descriptor.filters = [
           ...(descriptor.filters ?? []),
@@ -1164,7 +1176,9 @@ export class Vex<A = unknown> implements VexCalls {
       // A single group is an AND of filters like any other; an OR of
       // several is recorded apart, every group of which a write must
       // miss to be ruled out.
-      whereAny(groups) {
+      whereAny(unchecked) {
+        const groups = filterGroups(unchecked);
+        for (const group of groups) group.forEach(checkedFilter);
         current = current.whereAny(groups);
         if (groups.length === 1) {
           descriptor.filters = [...(descriptor.filters ?? []), ...groups[0]];
@@ -1235,7 +1249,9 @@ export class Vex<A = unknown> implements VexCalls {
       },
       groupBy: (col, aggs) => {
         const reads = new Set(Array.isArray(col) ? col : [col]);
-        for (const agg of Object.values(aggs)) {
+        for (const agg of Object.values(
+          plainObject(aggs, "groupBy's aggregates"),
+        )) {
           if (Array.isArray(agg)) reads.add(agg[1]);
         }
         record([...reads]);
@@ -1364,7 +1380,8 @@ export class Vex<A = unknown> implements VexCalls {
             writes?.push(RAW_WRITE);
           return self.storage.rawQuery<T>(sql, ...params);
         },
-        table(name: string): MutationTable {
+        table(unchecked: string): MutationTable {
+          const name = readableTable(unchecked);
           const adapter = self.storage;
           const recording = writes !== undefined;
           const held = (id: string) =>
@@ -1404,11 +1421,14 @@ export class Vex<A = unknown> implements VexCalls {
             eq: Record<string, unknown>,
           ): MutationTable {
             return {
-              where: (col, op, val) =>
-                build(
+              // Checked before its column keys what a delete records.
+              where: (col, op, val) => {
+                checkedFilter({ column: col, operator: op, value: val });
+                return build(
                   qb.where(col, op, val),
                   op === "=" ? { ...eq, [col]: val } : eq,
-                ),
+                );
+              },
               whereAny: (groups) => build(qb.whereAny(groups), eq),
               select: (...cols) => build(qb.select(...cols), eq),
               order: (col, dir) => build(qb.order(col, dir), eq),
@@ -1428,7 +1448,8 @@ export class Vex<A = unknown> implements VexCalls {
               // after it (WriteDependency.values): an insert's whole row
               // with the id it is given here, an update's or upsert's
               // columns left as they were, a delete's whole row.
-              insert: (row) => {
+              insert: (unchecked) => {
+                const row = plainObject(unchecked, `${name}.insert(row)`);
                 const _id = row._id ?? generateId(12);
                 const full = { ...row, _id };
                 writes?.push({
@@ -1438,7 +1459,17 @@ export class Vex<A = unknown> implements VexCalls {
                 });
                 return adapter.insert(name, full);
               },
-              upsert: async (keys, data) => {
+              upsert: async (uncheckedKeys, uncheckedData) => {
+                const keys = plainObject(uncheckedKeys, `${name}.upsert(keys)`);
+                const data = plainObject(
+                  uncheckedData,
+                  `${name}.upsert(…, data)`,
+                );
+                // No key matches every row: the upsert would overwrite
+                // whichever the lookup reads first.
+                if (Object.keys(keys).length === 0) {
+                  throw new ArgsError(`${name}.upsert(keys) needs a key`);
+                }
                 const _id = generateId(12);
                 if (recording) {
                   let lookup = adapter.query(name);
@@ -1458,8 +1489,9 @@ export class Vex<A = unknown> implements VexCalls {
                 }
                 return adapter.upsert(name, keys, data, _id);
               },
-              update: async (id, data) => {
+              update: async (id, unchecked) => {
                 const target = rowId(name, "update", id);
+                const data = plainObject(unchecked, `${name}.update(…, data)`);
                 writes?.push(updateWrite(target, await held(target), data));
                 return adapter.update(name, target, data);
               },
@@ -2394,7 +2426,8 @@ export class Vex<A = unknown> implements VexCalls {
     };
   }
 
-  async describeTable(table: string) {
+  async describeTable(unchecked: string) {
+    const table = readableTable(unchecked);
     const rowCount = await this.storage.query(table).count();
     return {
       name: table,
@@ -2441,7 +2474,11 @@ export class Vex<A = unknown> implements VexCalls {
     };
   }
 
-  async readTable(table: string, opts?: { limit?: number; offset?: number }) {
+  async readTable(
+    unchecked: string,
+    opts?: { limit?: number; offset?: number },
+  ) {
+    const table = readableTable(unchecked);
     return this.trace("query", `_system.readTable:${table}`, null, async () => {
       const total = await this.storage.query(table).count();
       const reader = this.storage.query(table);
@@ -2543,8 +2580,8 @@ function declaredColumns(
  */
 function rowId(table: string, verb: "update" | "delete", id: unknown): string {
   if (typeof id === "string" && id !== "") return id;
-  const got = id === "" ? "an empty string" : String(id);
-  throw new Error(
+  const got = id === "" ? "an empty string" : shownValue(id);
+  throw new ArgsError(
     verb === "delete"
       ? `${table}.delete(id) needs a row id, got ${got}; call delete() with no argument to delete the rows the filters match`
       : `${table}.update(id) needs a row id, got ${got}`,
