@@ -5,12 +5,7 @@
  * filter means to the letter.
  */
 
-import {
-  filter,
-  filterGroups,
-  filterOperator,
-  identifier,
-} from "./args-error.js";
+import { checkedFilter, filterGroups, identifier } from "./args-error.js";
 import { serializeValue } from "./sql-value.js";
 import type { Condition, Filter } from "./types.js";
 
@@ -55,9 +50,9 @@ export function buildWhereClause(filters: readonly Condition[]): {
 
 /** One filter's SQL, its parameters appended to `params`. */
 function filterSql(unchecked: Filter, params: any[]): string {
-  const f = filter(unchecked);
-  // Written into the SQL as text: refused unless it is one we know.
-  const operator = filterOperator(f.operator);
+  // Its column and operator are written into the SQL as text.
+  const f = checkedFilter(unchecked);
+  const { operator } = f;
   const column = quoteIdent(f.column);
   if (operator === "IN") {
     const values = (Array.isArray(f.value) ? f.value : [f.value]).map(

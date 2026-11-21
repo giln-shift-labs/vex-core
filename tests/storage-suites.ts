@@ -1351,7 +1351,7 @@ export function sqliteSchemaSuite(
         adapter.ensureTable("__vex_sqlite_indexes", {
           columns: { name: { type: "string" } },
         }),
-      ).toThrow("reserved SQLite metadata table name");
+      ).toThrow("reserved internal table name");
 
       const rows = await adapter.rawQuery<{ name: string }>(
         "SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?",
@@ -1368,7 +1368,7 @@ export function sqliteSchemaSuite(
         adapter.ensureTable("__VEX_sqlite_indexes", {
           columns: { name: { type: "string" } },
         }),
-      ).toThrow("reserved SQLite metadata table name");
+      ).toThrow("reserved internal table name");
 
       const rows = await adapter.rawQuery<{ name: string }>(
         "SELECT name FROM sqlite_master WHERE lower(name) = lower(?)",
@@ -1386,7 +1386,7 @@ export function sqliteSchemaSuite(
         adapter.ensureTable("sqlite_sequence", {
           columns: { name: { type: "string" } },
         }),
-      ).toThrow("reserved SQLite internal table name");
+      ).toThrow("reserved internal table name");
 
       expect(adapter.getSchema("sqlite_sequence")).toBeNull();
       adapter.close();
@@ -1399,7 +1399,7 @@ export function sqliteSchemaSuite(
         adapter.ensureTable("SQLite_sequence", {
           columns: { name: { type: "string" } },
         }),
-      ).toThrow("reserved SQLite internal table name");
+      ).toThrow("reserved internal table name");
 
       expect(adapter.getSchema("SQLite_sequence")).toBeNull();
       adapter.close();
@@ -2052,13 +2052,13 @@ export function sqliteSchemaSuite(
           renamedFrom: ["__vex_sqlite_indexes"],
           columns: { a: text },
         }),
-      ).toThrow("reserved SQLite metadata table name");
+      ).toThrow("reserved internal table name");
       expect(() =>
         adapter.ensureTable("items", {
           renamedFrom: ["sqlite_sequence"],
           columns: { a: text },
         }),
-      ).toThrow("reserved SQLite internal table name");
+      ).toThrow("reserved internal table name");
       expect(() =>
         adapter.ensureTable("items", {
           renamedFrom: ["Items"],

@@ -294,7 +294,16 @@ ctx.db.table("orders")
   .limit(20);
 ```
 
-A table or column name is a non-empty string without NUL (and `ctx.db.table()` refuses SQLite's `sqlite_*` tables and the engine's `__vex_*` ones), a filter's operator one of `=` `!=` `<` `>` `<=` `>=` `IN`, a sort direction `"asc"` or `"desc"`, `limit`/`offset` a non-negative safe integer, and a `groupBy` aggregate `"count"` or `[sum|avg|min|max|countDistinct, column]`. A write's row, keys and data are objects, and an upsert names at least one key. Anything else, such as a limit that arrived in an operation's args as a string, makes the read throw an `ArgsError`, which answers a call as a 400. Convert args before handing them to the builder.
+What the builder accepts:
+
+- a table or column name: a non-empty string without NUL. No table is registered or read by a name of SQLite's (`sqlite_*`) or of the storage's bookkeeping (`__vex_*`);
+- a filter's operator: `=` `!=` `<` `>` `<=` `>=` `IN`;
+- a sort direction: `"asc"` or `"desc"`;
+- `limit` and `offset`: a non-negative safe integer;
+- a `groupBy` aggregate: `"count"` or `[sum|avg|min|max|countDistinct, column]`;
+- a write's row, keys and data: objects; an upsert names at least one key.
+
+Anything else, such as a limit that arrived in an operation's args as a string, throws an `ArgsError`, which answers a call as a 400. Convert args before handing them to the builder.
 
 ### Table access policies
 

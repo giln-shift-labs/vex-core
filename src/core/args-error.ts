@@ -2,11 +2,12 @@ import { HttpError } from "../http/error.js";
 import type { AggDef, Filter } from "./types.js";
 
 /**
- * A value the engine refuses as an argument: a query builder's filter
- * operator, sort direction, limit, offset or aggregate outside what it
- * accepts. The builders write those into SQL as text, so a value they
- * do not know is refused rather than written. It answers a call as a
- * 400.
+ * A value the engine refuses as an argument to the query builder or a
+ * table's writes: a name, operator, sort direction, limit, offset or
+ * aggregate it does not know, or a filter, row or hold of the wrong
+ * shape. The builders write names and keywords into SQL as text, so a
+ * value they do not know is refused rather than written. It answers a
+ * call as a 400.
  */
 export class ArgsError extends HttpError {
   constructor(message: string) {
@@ -16,7 +17,7 @@ export class ArgsError extends HttpError {
 }
 
 /** A refused value, short enough to echo back in a message. */
-function shownValue(value: unknown): string {
+export function shownValue(value: unknown): string {
   let shown: string;
   try {
     shown = JSON.stringify(value) ?? String(value);
@@ -28,9 +29,10 @@ function shownValue(value: unknown): string {
 
 /*
  * The checks below are the one definition of what the builders
- * accept. The adapters run them where they write SQL; the access guard
- * runs them where it evaluates in JS instead, so a restricted caller
- * and an unrestricted one are refused alike.
+ * accept. The adapters run them where they write SQL, the engine where
+ * it reads a value's shape before the adapters see it, and the access
+ * guard where a restricted read evaluates in JS instead of SQL, so a
+ * restricted caller and an unrestricted one are refused alike.
  */
 
 /**
@@ -50,27 +52,45 @@ export function identifier(name: unknown): string {
 }
 
 /**
- * A table `ctx.db.table()` may read: a name, and none of SQLite's own
- * tables (`sqlite_*`) or the engine's (`__vex_*`), which hold the
- * schema and its bookkeeping, not an app's rows. Matched without case,
- * as SQLite matches table names.
+ * SQLite's own tables (`sqlite_*`) and the storage's bookkeeping
+ * (`__vex_*`), which hold the schema, not an app's rows: no table is
+ * registered under such a name, and none is read by one. Matched
+ * without case, as SQLite matches table names.
  */
-export function tableName(name: unknown): string {
+export function isInternalTable(name: string): boolean {
+  return /^(sqlite_|__vex_)/i.test(name);
+}
+
+/** A table a caller may read by name (`ctx.db.table()`, `vex.readTable()`). */
+export function readableTable(name: unknown): string {
   const table = identifier(name);
-  if (/^(sqlite_|__vex_)/i.test(table)) {
+  if (isInternalTable(table)) {
     throw new ArgsError(`Table ${shownValue(table)} is internal`);
   }
   return table;
 }
 
-/** A filter: an object naming a column, an operator and a value. */
-export function filter(f: unknown): Filter {
-  if (f !== null && typeof f === "object" && !Array.isArray(f)) {
-    return f as Filter;
+/** groupBy's columns, one or a list: at least one name. */
+export function groupColumns(columns: unknown): string[] {
+  const list = Array.isArray(columns) ? columns : [columns];
+  if (list.length === 0) throw new ArgsError("groupBy needs a column");
+  return list.map(identifier);
+}
+
+/**
+ * A filter: an object naming a column and an operator the builders
+ * know, and a value they bind as a parameter.
+ */
+export function checkedFilter(f: unknown): Filter {
+  if (f === null || typeof f !== "object" || Array.isArray(f)) {
+    throw new ArgsError(
+      `A filter must be { column, operator, value }; got ${shownValue(f)}`,
+    );
   }
-  throw new ArgsError(
-    `A filter must be { column, operator, value }; got ${shownValue(f)}`,
-  );
+  const { column, operator } = f as Filter;
+  identifier(column);
+  filterOperator(operator);
+  return f as Filter;
 }
 
 /** whereAny's groups: an array of arrays of filters. */
@@ -88,7 +108,7 @@ export function filterGroups(groups: unknown): Filter[][] {
  * Their keys become column names or aliases, so a string or an array
  * would name its characters' or elements' positions.
  */
-export function record(value: unknown, what: string): Record<string, any> {
+export function plainObject(value: unknown, what: string): Record<string, any> {
   if (value !== null && typeof value === "object" && !Array.isArray(value)) {
     return value as Record<string, any>;
   }

@@ -1,7 +1,7 @@
 import {
-  ArgsError,
   aggregate,
-  record,
+  groupColumns,
+  plainObject,
   rowCount,
   sortDirection,
 } from "../core/args-error.js";
@@ -78,7 +78,8 @@ function windowSql(
   offset: unknown,
 ): string {
   let sql = "";
-  if (orderCol) {
+  // No column is no order; any other value must be a name.
+  if (orderCol != null) {
     sql += ` ORDER BY ${quoteIdent(orderCol)} ${sortDirection(orderDir)}`;
   }
   if (limit !== null) sql += ` LIMIT ${rowCount("limit", limit)}`;
@@ -235,7 +236,7 @@ export function createQueryBuilder(exec: DbExec, table: string): QueryBuilder {
 function buildAggSelect(aggs: Record<string, AggDef>): string[] {
   const selects: string[] = [];
   for (const [alias, unchecked] of Object.entries(
-    record(aggs, "groupBy's aggregates"),
+    plainObject(aggs, "groupBy's aggregates"),
   )) {
     // The function is written into the SQL as text.
     const def = aggregate(unchecked);
@@ -264,14 +265,13 @@ function createGroupByBuilder(
   columns: string | string[],
   aggs: Record<string, AggDef>,
 ): GroupByBuilder {
-  const cols = Array.isArray(columns) ? columns : [columns];
-  if (cols.length === 0) throw new ArgsError("groupBy needs a column");
   const havingFilters: Filter[] = [];
   let orderCol: string | null = null;
   let orderDir: "asc" | "desc" = "asc";
   let limitN: number | null = null;
 
   function execute(): Promise<Record<string, any>[]> {
+    const cols = groupColumns(columns);
     const { sql: where, params } = buildWhereClause(filters);
     const groupCols = cols.map((c) => quoteIdent(c)).join(", ");
     const selects = [

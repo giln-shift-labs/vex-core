@@ -56,11 +56,14 @@
 
 import {
   aggregate,
-  filterOperator,
-  record,
+  checkedFilter,
+  groupColumns,
+  identifier,
+  plainObject,
   rowCount,
   sortDirection,
 } from "./args-error.js";
+import { serializeValue } from "./sql-value.js";
 import type {
   AggDef,
   Filter,
@@ -192,13 +195,17 @@ function maxOf(values: any[]): any {
 
 /**
  * One filter applied to an in-memory value, matching the SQL the
- * adapters build: `=`/`!=` against NULL read as IS (NOT) NULL, other
- * comparisons against NULL never match, IN unions membership with an
- * explicit NULL check.
+ * adapters build: both sides compared as they bind and store (a
+ * boolean as 1 or 0, an object as its JSON text), `=`/`!=` against
+ * NULL read as IS (NOT) NULL, other comparisons against NULL never
+ * match, IN unions membership with an explicit NULL check.
  */
-function matchesFilter(value: any, filter: Filter): boolean {
-  const target = filter.value;
-  switch (filter.operator) {
+function matchesFilter(cell: any, f: Filter): boolean {
+  const value = serializeValue(cell);
+  const target = Array.isArray(f.value)
+    ? f.value.map(serializeValue)
+    : serializeValue(f.value);
+  switch (f.operator) {
     case "=":
       if (target === null || target === undefined) return value == null;
       return value != null && value === target;
@@ -236,20 +243,21 @@ function compareValues(a: any, b: any): number {
  * adapters build: NULLs group together, aggregates skip NULLs and
  * report NULL over an empty input, HAVING applies the filter grammar
  * to computed rows. HAVING, ORDER BY and LIMIT refuse what the
- * adapters refuse; the caller checks `aggs` before fetching.
+ * adapters refuse; the caller checks the columns and `aggs` before
+ * fetching.
  */
 function groupRows(
   rows: Record<string, any>[],
-  columns: string | string[],
+  cols: string[],
   aggs: Record<string, AggDef>,
   having: Filter[],
   order: { column: string; dir: "asc" | "desc" } | null,
   limit: number | null,
 ): Record<string, any>[] {
-  for (const filter of having) filterOperator(filter.operator);
+  having.forEach(checkedFilter);
+  if (order) identifier(order.column);
   const descending = order !== null && sortDirection(order.dir) === "DESC";
   const count = limit === null ? null : rowCount("limit", limit);
-  const cols = Array.isArray(columns) ? columns : [columns];
   const groups = new Map<string, Record<string, any>[]>();
   for (const row of rows) {
     const key = JSON.stringify(cols.map((col) => row[col] ?? null));
@@ -294,7 +302,7 @@ function groupRows(
   }
 
   out = out.filter((row) =>
-    having.every((filter) => matchesFilter(row[filter.column], filter)),
+    having.every((f) => matchesFilter(row[f.column], f)),
   );
   if (order) {
     const sign = descending ? -1 : 1;
@@ -358,6 +366,10 @@ export function guardQueryBuilder(
     columns: readonly string[] | null,
   ): Promise<Record<string, any>[]> {
     const narrow = narrowing(prepared);
+    // Read from JS rows here, not written into SQL when the policy
+    // does not narrow: checked as the adapters check the names they
+    // write.
+    columns?.forEach(identifier);
     // Narrowed, the columns `row` reads ride beside the caller's; not,
     // `row` may read any column, so the rows come whole. Set on every
     // read: the underlying query is shared by every read of this
@@ -579,23 +591,23 @@ export function guardQueryBuilder(
             if (groupLimit !== null) chain = chain.limit(groupLimit);
             return Promise.resolve(chain);
           },
-          async (prepared) =>
-            groupRows(
-              await fetchAccepted(prepared, null, [
-                ...(Array.isArray(columns) ? columns : [columns]),
-                ...Object.values(record(aggs, "groupBy's aggregates")).flatMap(
-                  (unchecked) => {
-                    const def = aggregate(unchecked);
-                    return def === "count" ? [] : [def[1]];
-                  },
-                ),
-              ]),
-              columns,
+          async (prepared) => {
+            const cols = groupColumns(columns);
+            const reads = Object.values(
+              plainObject(aggs, "groupBy's aggregates"),
+            ).flatMap((unchecked) => {
+              const def = aggregate(unchecked);
+              return def === "count" ? [] : [def[1]];
+            });
+            return groupRows(
+              await fetchAccepted(prepared, null, [...cols, ...reads]),
+              cols,
               aggs,
               having,
               order,
               groupLimit,
-            ),
+            );
+          },
         );
       };
 
@@ -604,8 +616,9 @@ export function guardQueryBuilder(
           having.push({ column, operator, value });
           return builder;
         },
+        // No column is no order, as the adapters read it.
         order(column, dir = "asc") {
-          order = { column, dir };
+          order = column == null ? null : { column, dir };
           return builder;
         },
         limit(n) {

@@ -6,14 +6,15 @@ import { Vex } from "../src/core/engine.js";
 import type { StorageAdapter } from "../src/core/storage.js";
 import type { TableSchema, VexUser } from "../src/core/types.js";
 
-// The query builder writes a filter's operator, a sort direction, a
-// limit, an offset and a groupBy aggregate into SQL as text. Typed callers cannot send
-// anything else, but an operation's args arrive untyped, so each
-// position refuses what it does not know instead of writing it
-// (SHFT-2955). One test per position, through every builder that
-// writes it: the main builder, distinct() and groupBy(); then the same
-// refusals from an access-governed table, whose restricted reads
-// apply them in JS.
+// The query builder writes names, a filter's operator, a sort
+// direction, a limit, an offset and a groupBy aggregate into SQL as
+// text. Typed callers cannot send anything else, but an operation's
+// args arrive untyped, so each position refuses what it does not know
+// instead of writing it (SHFT-2955). One test per position, through
+// every builder that writes it (the main builder, distinct() and
+// groupBy()); then the same refusals from an access-governed table,
+// whose restricted reads apply them in JS, from a subscription, whose
+// reads are tracked, and for the shapes of filters, rows and holds.
 
 const schema: TableSchema = {
   columns: {
@@ -279,16 +280,22 @@ describe("an access-governed table", () => {
             args: { spec: "json" },
             handler: async (ctx, { spec }) => {
               let q = ctx.db.table("notes");
+              if ("select" in spec) q = q.select(spec.select);
               if (spec.op) q = q.where("owner", spec.op, "alice");
               if (spec.dir) q = q.order("note", spec.dir);
               if ("limit" in spec) q = q.limit(spec.limit);
               if ("offset" in spec) q = q.offset(spec.offset);
               if (spec.terminal === "first") return q.first();
-              if (spec.terminal === "distinct") return q.distinct("note");
+              if (spec.terminal === "distinct") {
+                return q.distinct(spec.col ?? "note");
+              }
               if (spec.terminal !== "groupBy") return q.all();
-              let g = q.groupBy("owner", { v: spec.agg ?? "count" });
+              let g = q.groupBy(spec.groupCols ?? "owner", {
+                v: spec.agg ?? "count",
+              });
               if (spec.having) g = g.having("v", spec.having, 0);
-              g = g.order("owner", spec.groupDir ?? "asc");
+              if ("havingCol" in spec) g = g.having(spec.havingCol, ">", 0);
+              g = g.order(spec.groupOrder ?? "owner", spec.groupDir ?? "asc");
               if ("groupLimit" in spec) g = g.limit(spec.groupLimit);
               return g;
             },
@@ -316,6 +323,14 @@ describe("an access-governed table", () => {
         [{ terminal: "groupBy", having: "> 0 OR 1 =" }, /operator/],
         [{ terminal: "groupBy", groupDir: "DESC" }, /direction/],
         [{ terminal: "groupBy", groupLimit: "1" }, /limit must be/],
+        // Names a restricted read without a narrowing looks up in JS.
+        [{ select: {} }, /name/],
+        [{ terminal: "distinct", col: "" }, /name/],
+        [{ terminal: "groupBy", groupCols: [] }, /needs a column/],
+        [{ terminal: "groupBy", groupCols: [{}] }, /name/],
+        [{ terminal: "groupBy", havingCol: {} }, /name/],
+        [{ terminal: "groupBy", groupOrder: 5 }, /name/],
+        [{ terminal: "groupBy", groupOrder: "" }, /name/],
       ];
       for (const [spec, pattern] of cases) {
         for (const user of [member, admin]) {
@@ -324,6 +339,69 @@ describe("an access-governed table", () => {
             pattern,
           );
         }
+      }
+    } finally {
+      await vex.close();
+    }
+  });
+
+  test("a restricted HAVING compares values as SQL binds them", async () => {
+    const vex = await Vex.create({
+      storage: sqliteAdapter(":memory:"),
+      plugins: [
+        (api) => {
+          api.setName("h");
+          api.registerTable("t", {
+            columns: {
+              owner: { type: "string" },
+              on: { type: "boolean" },
+              meta: { type: "json" },
+            },
+            access: {
+              prepare: (user) => (user?.isAdmin ? UNRESTRICTED : user?.id),
+              row: (owner, row) => row.owner === owner,
+            },
+          });
+          api.registerMutation("add", {
+            args: { row: "json" },
+            handler: (ctx, { row }) => ctx.db.table("t").insert(row),
+          });
+          api.registerQuery("having", {
+            args: { col: "string", value: "json" },
+            handler: (ctx, { col, value }) =>
+              ctx.db
+                .table("t")
+                .groupBy(["owner", col], { n: "count" })
+                .having(col, "=", value)
+                .order("owner"),
+          });
+        },
+      ],
+    });
+    try {
+      for (const [on, k] of [
+        [true, 1],
+        [false, 2],
+      ] as const) {
+        await vex.mutate("h.add", { row: { owner: "alice", on, meta: { k } } });
+      }
+      // A boolean binds as 1 or 0, an object as its JSON text.
+      for (const [col, value] of [
+        ["on", true],
+        ["meta", { k: 1 }],
+      ] as const) {
+        const asMember = await vex.query(
+          "h.having",
+          { col, value },
+          { user: member },
+        );
+        const asAdmin = await vex.query(
+          "h.having",
+          { col, value },
+          { user: admin },
+        );
+        expect(asMember).toHaveLength(1);
+        expect(asMember).toEqual(asAdmin);
       }
     } finally {
       await vex.close();
@@ -357,8 +435,8 @@ describe("names", () => {
         () => adapter.query("notes").where(bad, "=", 1).all(),
         /name/,
       );
-      // A falsy order column is no ORDER BY: nothing is written.
-      if (bad) {
+      // No order column (null) is no ORDER BY: nothing is written.
+      if (bad !== null) {
         await refused(() => adapter.query("notes").order(bad).all(), /name/);
       }
       await refused(() => adapter.query("notes").sum(bad), /name/);
@@ -471,10 +549,18 @@ describe("writes", () => {
           /upsert\(…, data\) must be an object/,
         );
       }
+      // A filtered delete's column keys what it records.
       await refused(
-        () => vex.mutate("w.call", { op: "update", a: null, b: {} }),
-        /needs a row id/,
+        () =>
+          vex.mutate("w.call", { op: "where", a: { toString: "x" }, b: "=" }),
+        /name/,
       );
+      for (const id of [null, { toString: "x" }]) {
+        await refused(
+          () => vex.mutate("w.call", { op: "update", a: id, b: {} }),
+          /needs a row id/,
+        );
+      }
     } finally {
       await vex.close();
     }
@@ -548,7 +634,7 @@ describe("groupBy aggregates", () => {
 });
 
 describe("internal tables", () => {
-  test("ctx.db.table() refuses SQLite's and the engine's own tables", async () => {
+  test("ctx.db.table() refuses SQLite's tables and the storage's bookkeeping", async () => {
     const vex = await Vex.create({
       storage: sqliteAdapter(":memory:"),
       plugins: [
@@ -580,9 +666,85 @@ describe("internal tables", () => {
         await refused(() => vex.query("i.read", { table }), /is internal/);
         await refused(() => vex.mutate("i.write", { table }), /is internal/);
       }
-      // An app's own tables, reserved underscore names included, still read.
+      // An app's own tables, the engine's _spans and _jobs included, still read.
       expect(await vex.query("i.read", { table: "notes" })).toEqual([]);
       expect(await vex.query("i.read", { table: "_spans" })).toEqual([]);
+      // So does the engine's own reader of a table by name.
+      await refused(() => vex.readTable("sqlite_master"), /is internal/);
+      await refused(
+        () => vex.describeTable("__vex_sqlite_indexes"),
+        /is internal/,
+      );
+      expect((await vex.readTable("notes")).total).toBe(0);
+    } finally {
+      await vex.close();
+    }
+  });
+
+  test("no table is registered under a name it could not be read by", async () => {
+    for (const name of ["__vex_cache", "__VEX_x", "sqlite_mine"]) {
+      await expect(
+        Vex.create({
+          storage: sqliteAdapter(":memory:"),
+          plugins: [
+            (api) => {
+              api.setName("r");
+              api.registerTable(name, schema);
+            },
+          ],
+        }),
+      ).rejects.toThrow("reserved internal table name");
+    }
+  });
+});
+
+describe("subscriptions", () => {
+  test("a tracked read refuses a malformed shape as a one-shot read does", async () => {
+    const vex = await Vex.create({
+      storage: sqliteAdapter(":memory:"),
+      plugins: [
+        (api) => {
+          api.setName("s");
+          api.registerTable("notes", schema);
+          api.registerQuery("read", {
+            args: { any: "json", aggs: "json" },
+            handler: (ctx, { any, aggs }) =>
+              aggs === undefined
+                ? ctx.db.table("notes").whereAny(any).all()
+                : ctx.db
+                    .table("notes")
+                    .groupBy("owner", aggs)
+                    .order("owner"),
+          });
+        },
+      ],
+    });
+    try {
+      // Subscriptions record what they read, reading the shape first.
+      for (const any of [null, "x", {}]) {
+        await refused(
+          () => vex.subscribe("s.read", { any }, () => {}),
+          /whereAny/,
+        );
+      }
+      for (const aggs of [null, "count", ["count"]]) {
+        await refused(
+          () => vex.subscribe("s.read", { aggs }, () => {}),
+          /aggregates must be an object/,
+        );
+      }
+      // A filter is checked before it is recorded and filed.
+      for (const column of [{ toString: "x" }, ""]) {
+        await refused(
+          () =>
+            vex.subscribe(
+              "s.read",
+              { any: [[{ column, operator: "=", value: 1 }]] },
+              () => {},
+            ),
+          /name/,
+        );
+      }
     } finally {
       await vex.close();
     }

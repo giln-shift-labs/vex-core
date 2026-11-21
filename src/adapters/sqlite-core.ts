@@ -1,3 +1,4 @@
+import { isInternalTable } from "../core/args-error.js";
 import { id as generateId } from "../core/id.js";
 import {
   changesRows,
@@ -157,13 +158,10 @@ function existingColumnSql(col: ExistingColumn): string {
 }
 
 function validateTableName(name: string): void {
-  if (name.toLowerCase() === SQLITE_INDEX_METADATA_TABLE) {
+  if (isInternalTable(name)) {
     throw new Error(
-      `reserved SQLite metadata table name: ${SQLITE_INDEX_METADATA_TABLE}`,
+      `reserved internal table name: ${quoteIdent(name)} (sqlite_* is SQLite's, __vex_* the storage's)`,
     );
-  }
-  if (name.toLowerCase().startsWith("sqlite_")) {
-    throw new Error(`reserved SQLite internal table name: ${quoteIdent(name)}`);
   }
 }
 

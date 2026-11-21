@@ -5,9 +5,11 @@
  *
  * Every builder method, in every argument position, is fed hostile
  * values: through the engine as JSON args (what a caller can send) on
- * a plain table and an access-governed one, as a member and an admin,
- * and straight to the adapter with values JSON cannot carry. Each case
- * is judged by four oracles:
+ * a plain table and two access-governed ones (one whose policy
+ * narrows in SQL, one decided in JS alone), as a member and an admin,
+ * as one-shot reads and as subscriptions; in mutations and sqlOver
+ * holds; and straight to the adapter with values JSON cannot carry.
+ * Each case is judged by five oracles:
  *
  *   structure  a payload's marker appears in executed SQL outside a
  *              correctly quoted identifier (it became SQL code)
@@ -16,6 +18,8 @@
  *              (an internal table read through ctx.db.table())
  *   syntax     SQLite reported a syntax error: a value changed the
  *              statement's shape even if it did not run
+ *   parity     a member and an admin sent the same read on a governed
+ *              table, and only one of them was refused (ArgsError)
  *
  * Exits 1 when any oracle fires.
  */
@@ -23,6 +27,7 @@
 import { Database } from "bun:sqlite";
 import { sqliteAdapter } from "../../src/adapters/sqlite.js";
 import { UNRESTRICTED } from "../../src/core/access.js";
+import { ArgsError } from "../../src/core/args-error.js";
 import { Vex } from "../../src/core/engine.js";
 import type { VexUser } from "../../src/core/types.js";
 
@@ -341,17 +346,13 @@ const WRITES = new Set([...READS, "insert", "update", "upsert", "delete"]);
 async function apply(start: any, ops: Op[], allowed: Set<string>, ids: string[]) {
   let x = start;
   for (const [method, ...args] of ops) {
-    // A key fuzzed as a row's column name.
-    if (method === "insertKey") {
-      x = await x.insert({ owner: "k", [String(args[0])]: 1 });
-      continue;
-    }
-    if (method === "updateKey") {
-      x = await x.update(ids[0], { [String(args[0])]: 1 });
-      continue;
-    }
-    if (method === "upsertKey") {
-      x = await x.upsert({ [String(args[0])]: 1 }, { note: "u" });
+    // A key fuzzed as a row's column name; JSON keys are strings.
+    if (method === "insertKey" || method === "updateKey" || method === "upsertKey") {
+      if (typeof args[0] !== "string") return null;
+      const key = { [args[0]]: 1 };
+      if (method === "insertKey") x = await x.insert({ owner: "k", ...key });
+      if (method === "updateKey") x = await x.update(ids[0], key);
+      if (method === "upsertKey") x = await x.upsert(key, { note: "u" });
       continue;
     }
     if (!allowed.has(method)) throw new Error(`fuzz: no method ${method}`);
@@ -385,13 +386,21 @@ async function createEngine(): Promise<Vex> {
             }),
           },
         });
+        // Governed, decided in JS alone: no narrowing.
+        api.registerTable("unotes", {
+          columns,
+          access: {
+            prepare: (user) => (user?.isAdmin ? UNRESTRICTED : user?.id),
+            row: (owner, row) => row.owner === owner,
+          },
+        });
         api.registerTable("canary", {
           columns: { secret: { type: "string" } },
         });
         api.registerMutation("seed", {
           args: {},
           async handler(ctx) {
-            for (const table of ["notes", "gnotes"]) {
+            for (const table of ["notes", "gnotes", "unotes"]) {
               await ctx.db.table(table).insert({ owner: "alice", note: "a1", n: 1 });
               await ctx.db.table(table).insert({ owner: "bob", note: "b1", n: 2 });
             }
@@ -401,6 +410,11 @@ async function createEngine(): Promise<Vex> {
         api.registerQuery("read", {
           args: { table: "json", ops: "json" },
           reactive: false,
+          handler: (ctx, args) =>
+            apply(ctx.db.table(args.table), args.ops, READS, []),
+        });
+        api.registerQuery("live", {
+          args: { table: "json", ops: "json" },
           handler: (ctx, args) =>
             apply(ctx.db.table(args.table), args.ops, READS, []),
         });
@@ -430,7 +444,7 @@ async function createEngine(): Promise<Vex> {
 // --- oracles -----------------------------------------------------------
 
 interface Finding {
-  oracle: "structure" | "integrity" | "leak" | "syntax";
+  oracle: "structure" | "integrity" | "leak" | "syntax" | "parity";
   position: string;
   surface: string;
   payload: string;
@@ -468,14 +482,16 @@ async function judge(
   payload: unknown,
   run: () => Promise<unknown>,
   readsCanaryByName = false,
-) {
+): Promise<{ changed: boolean; refused: boolean }> {
   cases++;
   const before = await schemaOf(vex);
   captured = [];
   let result: unknown;
+  let refused = false;
   try {
     result = await run();
   } catch (err: any) {
+    refused = err instanceof ArgsError;
     const name = err?.name ?? typeof err;
     const message = String(err?.message ?? err);
     const kind = `${name}: ${message.replace(/"[^"]*"|'[^']*'|\d+/g, "…").slice(0, 70)}`;
@@ -529,9 +545,9 @@ async function judge(
       payload: show(payload),
       detail: "schema or canary changed",
     });
-    return true;
+    return { changed: true, refused };
   }
-  return false;
+  return { changed: false, refused };
 }
 
 // --- runs --------------------------------------------------------------
@@ -561,32 +577,84 @@ async function main() {
     await vex.mutate("f.seed", {});
   };
 
-  const tables = ["notes", "gnotes"];
+  const tables = ["notes", "gnotes", "unotes"];
   const users: Array<[string, VexUser | null]> = [
     ["none", null],
     ["member", member],
     ["admin", admin],
   ];
 
-  // 1. Every read position x every JSON payload x table x caller.
+  // 1. Every read position x every JSON payload x table x caller, as
+  // a one-shot read; on a governed table a member and an admin must be
+  // refused alike.
   for (const [position, template] of Object.entries(readPositions)) {
     for (const payload of jsonPayloads) {
       for (const table of tables) {
+        const refusedBy = new Map<string, boolean>();
         for (const [who, user] of users) {
           if (table === "notes" && who !== "none") continue;
           const ops = fill(template, payload) as Op[];
-          const changed = await judge(vex, position, `query ${table} ${who}`, payload, () =>
-            vex.query("f.read", { table, ops }, user ? { user } : undefined),
+          const { changed, refused } = await judge(
+            vex,
+            position,
+            `query ${table} ${who}`,
+            payload,
+            () => vex.query("f.read", { table, ops }, user ? { user } : undefined),
           );
+          refusedBy.set(who, refused);
           if (changed) await reset();
         }
+        if (
+          table !== "notes" &&
+          refusedBy.get("member") !== refusedBy.get("admin")
+        ) {
+          findings.push({
+            oracle: "parity",
+            position,
+            surface: `query ${table}`,
+            payload: show(payload),
+            detail: `member refused: ${refusedBy.get("member")}, admin refused: ${refusedBy.get("admin")}`,
+          });
+        }
+      }
+    }
+  }
+
+  // 1b. The same reads as subscriptions, whose reads are tracked.
+  for (const [position, template] of Object.entries(readPositions)) {
+    for (const payload of jsonPayloads) {
+      for (const [table, user] of [
+        ["notes", null],
+        ["unotes", member],
+      ] as const) {
+        const ops = fill(template, payload) as Op[];
+        const { changed } = await judge(
+          vex,
+          position,
+          `subscribe ${table}`,
+          payload,
+          async () => {
+            let answer: unknown;
+            const stop = await vex.subscribe(
+              "f.live",
+              { table, ops },
+              (value) => {
+                answer = value;
+              },
+              user ? { user } : undefined,
+            );
+            stop();
+            return answer;
+          },
+        );
+        if (changed) await reset();
       }
     }
   }
 
   // 2. The table name itself.
   for (const payload of jsonPayloads) {
-    const changed = await judge(
+    const { changed } = await judge(
       vex,
       "table.name",
       "query",
@@ -602,7 +670,7 @@ async function main() {
     for (const payload of jsonPayloads) {
       for (const table of tables) {
         const ops = fill(template, payload) as Op[];
-        const changed = await judge(vex, position, `mutation ${table}`, payload, () =>
+        const { changed } = await judge(vex, position, `mutation ${table}`, payload, () =>
           vex.mutate("f.write", { table, ops }),
         );
         if (changed) await reset();
@@ -610,11 +678,12 @@ async function main() {
     }
   }
 
-  // 4. sqlOver holds.
+  // 4. sqlOver holds. A hold's table is an object key: a string.
   for (const [position, template] of Object.entries(overPositions)) {
     for (const payload of jsonPayloads) {
+      if (position === "sqlOver.table" && typeof payload !== "string") continue;
       const hold = fill(template, payload);
-      const changed = await judge(vex, position, "sqlOver", payload, () =>
+      const { changed } = await judge(vex, position, "sqlOver", payload, () =>
         vex.query("f.over", { hold }),
       );
       if (changed) await reset();
@@ -679,8 +748,13 @@ async function main() {
   const random = rng(seed);
   const pick = <T>(xs: T[]) => xs[Math.floor(random() * xs.length)];
   const allTemplates = Object.entries(readPositions);
+  // A prefix chains query-builder calls only: after groupBy() the chain
+  // is a GroupByBuilder, which takes none of them.
+  const prefixes = allTemplates.filter(
+    ([, ops]) => !ops.some(([method]) => method === "groupBy"),
+  );
   for (let i = 0; i < randomCases; i++) {
-    const [p1, t1] = pick(allTemplates);
+    const [p1, t1] = pick(prefixes);
     const [p2, t2] = pick(allTemplates);
     const ops = [
       ...(fill(t1.slice(0, -1), pick(jsonPayloads)) as Op[]),
@@ -688,7 +762,7 @@ async function main() {
     ];
     const table = pick(tables);
     const [who, user] = pick(users);
-    const changed = await judge(vex, `${p1}+${p2}`, `random ${table} ${who}`, ops, () =>
+    const { changed } = await judge(vex, `${p1}+${p2}`, `random ${table} ${who}`, ops, () =>
       vex.query("f.read", { table, ops }, user ? { user } : undefined),
     );
     if (changed) await reset();
