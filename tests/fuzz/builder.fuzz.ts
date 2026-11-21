@@ -12,7 +12,8 @@
  *   structure  a payload's marker appears in executed SQL outside a
  *              correctly quoted identifier (it became SQL code)
  *   integrity  the canary row or the schema changed
- *   leak       a result carries the canary's secret
+ *   leak       a result carries the canary's secret, or schema SQL
+ *              (an internal table read through ctx.db.table())
  *   syntax     SQLite reported a syntax error: a value changed the
  *              statement's shape even if it did not run
  *
@@ -150,6 +151,11 @@ const jsonPayloads: unknown[] = [
   "_id",
   "canary",
   "sqlite_master",
+  "sqlite_schema",
+  "SQLITE_MASTER",
+  "sqlite_stat1",
+  "__vex_sqlite_indexes",
+  "__VEX_SQLITE_INDEXES",
   "main.canary",
   "notes",
   null,
@@ -504,7 +510,7 @@ async function judge(
     try {
       text = JSON.stringify(result) ?? "";
     } catch {}
-    if (text.includes(SECRET)) {
+    if (text.includes(SECRET) || /CREATE (TABLE|INDEX)|idx_/.test(text)) {
       findings.push({
         oracle: "leak",
         position,

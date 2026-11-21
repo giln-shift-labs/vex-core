@@ -546,3 +546,45 @@ describe("groupBy aggregates", () => {
     }
   });
 });
+
+describe("internal tables", () => {
+  test("ctx.db.table() refuses SQLite's and the engine's own tables", async () => {
+    const vex = await Vex.create({
+      storage: sqliteAdapter(":memory:"),
+      plugins: [
+        (api) => {
+          api.setName("i");
+          api.registerTable("notes", schema);
+          api.registerQuery("read", {
+            args: { table: "string" },
+            reactive: false,
+            handler: (ctx, { table }) => ctx.db.table(table).all(),
+          });
+          api.registerMutation("write", {
+            args: { table: "string" },
+            handler: (ctx, { table }) => ctx.db.table(table).count(),
+          });
+        },
+      ],
+    });
+    try {
+      for (const table of [
+        "sqlite_master",
+        "sqlite_schema",
+        "SQLITE_MASTER",
+        "sqlite_stat1",
+        "sqlite_sequence",
+        "__vex_sqlite_indexes",
+        "__VEX_sqlite_indexes",
+      ]) {
+        await refused(() => vex.query("i.read", { table }), /is internal/);
+        await refused(() => vex.mutate("i.write", { table }), /is internal/);
+      }
+      // An app's own tables, reserved underscore names included, still read.
+      expect(await vex.query("i.read", { table: "notes" })).toEqual([]);
+      expect(await vex.query("i.read", { table: "_spans" })).toEqual([]);
+    } finally {
+      await vex.close();
+    }
+  });
+});

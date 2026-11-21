@@ -8,7 +8,7 @@ import {
 import { AfterCommitRunner, nextTurn } from "./after-commit.js";
 import type { PluginFunction } from "./api.js";
 import { resolvePlugin } from "./api.js";
-import { ArgsError, record } from "./args-error.js";
+import { ArgsError, record, tableName } from "./args-error.js";
 import {
   type Evaluation,
   type EvaluationOptions,
@@ -1065,7 +1065,8 @@ export class Vex<A = unknown> implements VexCalls {
     }
     ctx = {
       db: {
-        table(name: string) {
+        table(unchecked: string) {
+          const name = tableName(unchecked);
           const policy = self.accessPolicies.get(name);
           if (!policy) return baseBuilder(name);
           return guardQueryBuilder(name, baseBuilder(name), policy, () =>
@@ -1365,7 +1366,8 @@ export class Vex<A = unknown> implements VexCalls {
             writes?.push(RAW_WRITE);
           return self.storage.rawQuery<T>(sql, ...params);
         },
-        table(name: string): MutationTable {
+        table(unchecked: string): MutationTable {
+          const name = tableName(unchecked);
           const adapter = self.storage;
           const recording = writes !== undefined;
           const held = (id: string) =>

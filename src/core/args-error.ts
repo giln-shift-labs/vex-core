@@ -49,6 +49,20 @@ export function identifier(name: unknown): string {
   );
 }
 
+/**
+ * A table `ctx.db.table()` may read: a name, and none of SQLite's own
+ * tables (`sqlite_*`) or the engine's (`__vex_*`), which hold the
+ * schema and its bookkeeping, not an app's rows. Matched without case,
+ * as SQLite matches table names.
+ */
+export function tableName(name: unknown): string {
+  const table = identifier(name);
+  if (/^(sqlite_|__vex_)/i.test(table)) {
+    throw new ArgsError(`Table ${shownValue(table)} is internal`);
+  }
+  return table;
+}
+
 /** A filter: an object naming a column, an operator and a value. */
 export function filter(f: unknown): Filter {
   if (f !== null && typeof f === "object" && !Array.isArray(f)) {
