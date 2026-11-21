@@ -132,10 +132,11 @@ function noteDrift(table: string, refused: number): void {
  *  whatever the policy's `prepare` produced. */
 type ResolvePrepared = () => Promise<unknown>;
 
-/** The adapter grammar reads `LIMIT -1` as "no limit" — the reset
+/** A limit no table reaches, standing for "no limit": the reset
  *  that clears an earlier limit() on the shared underlying builder
- *  before an exhaustive fetch. */
-const NO_LIMIT = -1;
+ *  before an exhaustive fetch. A limit is a non-negative safe
+ *  integer, so SQLite's `LIMIT -1` is not one. */
+const NO_LIMIT = Number.MAX_SAFE_INTEGER;
 /** First fetch size when a bounded read drives the refill loop. */
 const MIN_FETCH = 64;
 
@@ -359,9 +360,10 @@ export function guardQueryBuilder(
     let attempt =
       needed === null
         ? NO_LIMIT
-        : narrow
-          ? Math.max(needed, 1)
-          : Math.max(needed * 2, MIN_FETCH);
+        : Math.min(
+            narrow ? Math.max(needed, 1) : Math.max(needed * 2, MIN_FETCH),
+            NO_LIMIT,
+          );
     for (;;) {
       underlying.limit(attempt);
       const fetched = await underlying.all<Record<string, any>>();
@@ -374,7 +376,7 @@ export function guardQueryBuilder(
         }
         return accepted;
       }
-      attempt = attempt * 4;
+      attempt = Math.min(attempt * 4, NO_LIMIT);
     }
   }
 

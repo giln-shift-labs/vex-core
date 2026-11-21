@@ -294,6 +294,8 @@ ctx.db.table("orders")
   .limit(20);
 ```
 
+A filter's operator is one of `=` `!=` `<` `>` `<=` `>=` `IN`, a sort direction `"asc"` or `"desc"`, and `limit`/`offset` a non-negative safe integer. Anything else, such as a limit that arrived in an operation's args as a string, makes the read throw an `ArgsError`, which answers a call as a 400. Convert args before handing them to the builder.
+
 ### Table access policies
 
 A table can declare who sees its rows. Every query-context read of it (queries, subscriptions, their re-runs) answers a restricted caller exactly as a table holding only the rows they may see would: `.limit(n)` is n rows they may see, `count()` counts those. Raw SQL that reads it is refused in query contexts; mutation contexts are the trusted tier and read every row.

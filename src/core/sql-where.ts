@@ -5,8 +5,23 @@
  * filter means to the letter.
  */
 
+import { ArgsError, shownValue } from "./args-error.js";
 import { serializeValue } from "./sql-value.js";
 import type { Condition, Filter } from "./types.js";
+
+/**
+ * The operators a filter may name. The operator is written into the
+ * SQL as text, so anything else is refused, whatever its type said.
+ */
+const OPERATORS: ReadonlySet<unknown> = new Set<Filter["operator"]>([
+  "=",
+  "!=",
+  "<",
+  ">",
+  "<=",
+  ">=",
+  "IN",
+]);
 
 export function quoteIdent(name: string): string {
   return `"${name.replaceAll('"', '""')}"`;
@@ -40,6 +55,11 @@ export function buildWhereClause(filters: readonly Condition[]): {
 
 /** One filter's SQL, its parameters appended to `params`. */
 function filterSql(f: Filter, params: any[]): string {
+  if (!OPERATORS.has(f.operator)) {
+    throw new ArgsError(
+      `A filter's operator must be one of ${[...OPERATORS].join(" ")}; got ${shownValue(f.operator)}`,
+    );
+  }
   const column = quoteIdent(f.column);
   if (f.operator === "IN") {
     const values = (Array.isArray(f.value) ? f.value : [f.value]).map(

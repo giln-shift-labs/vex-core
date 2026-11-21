@@ -487,7 +487,7 @@ describe("narrowed governed reads", () => {
     expect(sql).toStartWith('SELECT "title", "_id", "ownerId" FROM "docs"');
     expect(sql).toContain('"kind" != ?');
     expect(sql).toContain('(("ownerId" = ?) OR (("_id" IN (');
-    expect(sql).toContain('ORDER BY "title" desc LIMIT 5');
+    expect(sql).toContain('ORDER BY "title" DESC LIMIT 5');
     expect(sql).not.toContain("*");
     expect(sql).not.toContain("body");
   });
@@ -524,7 +524,7 @@ describe("narrowed governed reads", () => {
       }),
     );
     expect(reads(sqls, "docs")).toEqual([
-      'SELECT "title" FROM "docs"  ORDER BY "title" asc LIMIT 5',
+      'SELECT "title" FROM "docs"  ORDER BY "title" ASC LIMIT 5',
     ]);
   });
 

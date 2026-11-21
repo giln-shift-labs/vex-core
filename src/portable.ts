@@ -19,6 +19,7 @@ export type {
 export { narrowingDrift, UNRESTRICTED } from "./core/access.js";
 export type { PluginFunction, VexPluginAPI } from "./core/api.js";
 export { createPluginAPI, resolvePlugin } from "./core/api.js";
+export { ArgsError } from "./core/args-error.js";
 export type { OperationDescription, VexOptions } from "./core/engine.js";
 export { Vex } from "./core/engine.js";
 export type {
