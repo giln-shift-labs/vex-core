@@ -294,7 +294,7 @@ ctx.db.table("orders")
   .limit(20);
 ```
 
-A filter's operator is one of `=` `!=` `<` `>` `<=` `>=` `IN`, a sort direction `"asc"` or `"desc"`, `limit`/`offset` a non-negative safe integer, and a `groupBy` aggregate `"count"` or `[sum|avg|min|max|countDistinct, column]`. Anything else, such as a limit that arrived in an operation's args as a string, makes the read throw an `ArgsError`, which answers a call as a 400. Convert args before handing them to the builder.
+A table or column name is a non-empty string without NUL, a filter's operator one of `=` `!=` `<` `>` `<=` `>=` `IN`, a sort direction `"asc"` or `"desc"`, `limit`/`offset` a non-negative safe integer, and a `groupBy` aggregate `"count"` or `[sum|avg|min|max|countDistinct, column]`. A write's row, keys and data are objects, and an upsert names at least one key. Anything else, such as a limit that arrived in an operation's args as a string, makes the read throw an `ArgsError`, which answers a call as a 400. Convert args before handing them to the builder.
 
 ### Table access policies
 

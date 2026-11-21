@@ -5,12 +5,18 @@
  * filter means to the letter.
  */
 
-import { filterOperator } from "./args-error.js";
+import {
+  filter,
+  filterGroups,
+  filterOperator,
+  identifier,
+} from "./args-error.js";
 import { serializeValue } from "./sql-value.js";
 import type { Condition, Filter } from "./types.js";
 
+/** A name as a quoted SQL identifier; see {@link identifier}. */
 export function quoteIdent(name: string): string {
-  return `"${name.replaceAll('"', '""')}"`;
+  return `"${identifier(name).replaceAll('"', '""')}"`;
 }
 
 /**
@@ -19,9 +25,17 @@ export function quoteIdent(name: string): string {
  * every row).
  */
 function conditionSql(condition: Condition, params: any[]): string {
-  if (!("any" in condition)) return filterSql(condition, params);
-  if (condition.any.length === 0) return "0 = 1";
-  const groups = condition.any.map((group) =>
+  // filterSql refuses whatever is neither shape.
+  if (
+    condition === null ||
+    typeof condition !== "object" ||
+    !("any" in condition)
+  ) {
+    return filterSql(condition as Filter, params);
+  }
+  const any = filterGroups(condition.any);
+  if (any.length === 0) return "0 = 1";
+  const groups = any.map((group) =>
     group.length === 0
       ? "1 = 1"
       : `(${group.map((f) => filterSql(f, params)).join(" AND ")})`,
@@ -40,7 +54,8 @@ export function buildWhereClause(filters: readonly Condition[]): {
 }
 
 /** One filter's SQL, its parameters appended to `params`. */
-function filterSql(f: Filter, params: any[]): string {
+function filterSql(unchecked: Filter, params: any[]): string {
+  const f = filter(unchecked);
   // Written into the SQL as text: refused unless it is one we know.
   const operator = filterOperator(f.operator);
   const column = quoteIdent(f.column);

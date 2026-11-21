@@ -33,6 +33,54 @@ function shownValue(value: unknown): string {
  * and an unrestricted one are refused alike.
  */
 
+/**
+ * A table, column or alias name. It is quoted into the SQL, and the
+ * quoting holds only for a string: anything else could answer the
+ * quoting with any text. SQLite ends a statement at a NUL, so a name
+ * holding one would cut the statement short; an empty name is no
+ * name.
+ */
+export function identifier(name: unknown): string {
+  if (typeof name === "string" && name !== "" && !name.includes("\0")) {
+    return name;
+  }
+  throw new ArgsError(
+    `A name must be a non-empty string without NUL; got ${shownValue(name)}`,
+  );
+}
+
+/** A filter: an object naming a column, an operator and a value. */
+export function filter(f: unknown): Filter {
+  if (f !== null && typeof f === "object" && !Array.isArray(f)) {
+    return f as Filter;
+  }
+  throw new ArgsError(
+    `A filter must be { column, operator, value }; got ${shownValue(f)}`,
+  );
+}
+
+/** whereAny's groups: an array of arrays of filters. */
+export function filterGroups(groups: unknown): Filter[][] {
+  if (Array.isArray(groups) && groups.every(Array.isArray)) {
+    return groups as Filter[][];
+  }
+  throw new ArgsError(
+    `whereAny takes an array of filter arrays; got ${shownValue(groups)}`,
+  );
+}
+
+/**
+ * Named entries: a write's columns and values, groupBy's aggregates.
+ * Their keys become column names or aliases, so a string or an array
+ * would name its characters' or elements' positions.
+ */
+export function record(value: unknown, what: string): Record<string, any> {
+  if (value !== null && typeof value === "object" && !Array.isArray(value)) {
+    return value as Record<string, any>;
+  }
+  throw new ArgsError(`${what} must be an object; got ${shownValue(value)}`);
+}
+
 const OPERATORS: ReadonlySet<unknown> = new Set<Filter["operator"]>([
   "=",
   "!=",

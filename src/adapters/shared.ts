@@ -1,4 +1,10 @@
-import { aggregate, rowCount, sortDirection } from "../core/args-error.js";
+import {
+  ArgsError,
+  aggregate,
+  record,
+  rowCount,
+  sortDirection,
+} from "../core/args-error.js";
 import { serializeValue } from "../core/sql-value.js";
 import { buildWhereClause, quoteIdent } from "../core/sql-where.js";
 import type {
@@ -228,7 +234,9 @@ export function createQueryBuilder(exec: DbExec, table: string): QueryBuilder {
 
 function buildAggSelect(aggs: Record<string, AggDef>): string[] {
   const selects: string[] = [];
-  for (const [alias, unchecked] of Object.entries(aggs)) {
+  for (const [alias, unchecked] of Object.entries(
+    record(aggs, "groupBy's aggregates"),
+  )) {
     // The function is written into the SQL as text.
     const def = aggregate(unchecked);
     if (def === "count") {
@@ -257,6 +265,7 @@ function createGroupByBuilder(
   aggs: Record<string, AggDef>,
 ): GroupByBuilder {
   const cols = Array.isArray(columns) ? columns : [columns];
+  if (cols.length === 0) throw new ArgsError("groupBy needs a column");
   const havingFilters: Filter[] = [];
   let orderCol: string | null = null;
   let orderDir: "asc" | "desc" = "asc";

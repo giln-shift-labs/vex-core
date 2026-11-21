@@ -8,6 +8,7 @@ import {
 import { AfterCommitRunner, nextTurn } from "./after-commit.js";
 import type { PluginFunction } from "./api.js";
 import { resolvePlugin } from "./api.js";
+import { ArgsError, record } from "./args-error.js";
 import {
   type Evaluation,
   type EvaluationOptions,
@@ -1428,7 +1429,8 @@ export class Vex<A = unknown> implements VexCalls {
               // after it (WriteDependency.values): an insert's whole row
               // with the id it is given here, an update's or upsert's
               // columns left as they were, a delete's whole row.
-              insert: (row) => {
+              insert: (unchecked) => {
+                const row = record(unchecked, `${name}.insert(row)`);
                 const _id = row._id ?? generateId(12);
                 const full = { ...row, _id };
                 writes?.push({
@@ -1438,7 +1440,14 @@ export class Vex<A = unknown> implements VexCalls {
                 });
                 return adapter.insert(name, full);
               },
-              upsert: async (keys, data) => {
+              upsert: async (uncheckedKeys, uncheckedData) => {
+                const keys = record(uncheckedKeys, `${name}.upsert(keys)`);
+                const data = record(uncheckedData, `${name}.upsert(…, data)`);
+                // No key matches every row: the upsert would overwrite
+                // whichever the lookup reads first.
+                if (Object.keys(keys).length === 0) {
+                  throw new ArgsError(`${name}.upsert(keys) needs a key`);
+                }
                 const _id = generateId(12);
                 if (recording) {
                   let lookup = adapter.query(name);
@@ -1458,8 +1467,9 @@ export class Vex<A = unknown> implements VexCalls {
                 }
                 return adapter.upsert(name, keys, data, _id);
               },
-              update: async (id, data) => {
+              update: async (id, unchecked) => {
                 const target = rowId(name, "update", id);
+                const data = record(unchecked, `${name}.update(…, data)`);
                 writes?.push(updateWrite(target, await held(target), data));
                 return adapter.update(name, target, data);
               },
@@ -2544,7 +2554,7 @@ function declaredColumns(
 function rowId(table: string, verb: "update" | "delete", id: unknown): string {
   if (typeof id === "string" && id !== "") return id;
   const got = id === "" ? "an empty string" : String(id);
-  throw new Error(
+  throw new ArgsError(
     verb === "delete"
       ? `${table}.delete(id) needs a row id, got ${got}; call delete() with no argument to delete the rows the filters match`
       : `${table}.update(id) needs a row id, got ${got}`,

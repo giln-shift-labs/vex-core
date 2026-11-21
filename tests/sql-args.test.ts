@@ -345,3 +345,204 @@ describe("an access-governed table", () => {
     }
   });
 });
+
+describe("names", () => {
+  test("a name that is not a non-empty string without NUL is refused", async () => {
+    // Quoting holds only for a string: an object answers it with any text.
+    const evil = { replaceAll: () => 'x" FROM sqlite_master --' } as any;
+    // SQLite ends a statement at a NUL, cutting off what follows.
+    for (const bad of [evil, "own\0er", "", null, 5, ["owner"], {}]) {
+      await refused(() => adapter.query("notes").select(bad).all(), /name/);
+      await refused(
+        () => adapter.query("notes").where(bad, "=", 1).all(),
+        /name/,
+      );
+      // A falsy order column is no ORDER BY: nothing is written.
+      if (bad) {
+        await refused(() => adapter.query("notes").order(bad).all(), /name/);
+      }
+      await refused(() => adapter.query("notes").sum(bad), /name/);
+      // groupBy takes a list of columns as well as one.
+      await refused(
+        async () =>
+          await adapter
+            .query("notes")
+            .groupBy(Array.isArray(bad) ? [bad] : bad, { n: "count" }),
+        /name/,
+      );
+      await refused(
+        async () =>
+          await adapter
+            .query("notes")
+            .groupBy("owner", { n: ["max", bad] }),
+        /name|aggregate/,
+      );
+      await refused(() => adapter.query(bad).all(), /name/);
+    }
+  });
+
+  test("a name holding quotes is still one quoted name", async () => {
+    const name = 'x" FROM sqlite_master --';
+    // SQLite reads a quoted name no column has as a string literal, so
+    // the whole name comes back as the value and nothing else is read.
+    const rows = await adapter.query("notes").select(name).all();
+    expect(rows.map((row) => Object.values(row))).toEqual([
+      [name],
+      [name],
+      [name],
+    ]);
+  });
+
+  test("groupBy needs a column", async () => {
+    await refused(
+      async () => await adapter.query("notes").groupBy([], { n: "count" }),
+      /needs a column/,
+    );
+  });
+});
+
+describe("conditions", () => {
+  test("whereAny takes arrays of filter objects, nothing else", async () => {
+    for (const bad of [null, "x", {}, [null], ["x"], [{}]]) {
+      await refused(
+        () =>
+          adapter
+            .query("notes")
+            .whereAny(bad as any)
+            .all(),
+        /whereAny|filter/,
+      );
+    }
+    for (const bad of [[[null]], [["x"]], [[[]]]]) {
+      await refused(
+        () =>
+          adapter
+            .query("notes")
+            .whereAny(bad as any)
+            .all(),
+        /filter/,
+      );
+    }
+  });
+});
+
+describe("writes", () => {
+  async function engine(): Promise<Vex> {
+    const vex = await Vex.create({
+      storage: sqliteAdapter(":memory:"),
+      plugins: [
+        (api) => {
+          api.setName("w");
+          api.registerTable("notes", schema);
+          api.registerMutation("call", {
+            args: { op: "string", a: "json", b: "json" },
+            handler: async (ctx, { op, a, b }) =>
+              (ctx.db.table("notes") as any)[op](a, b),
+          });
+        },
+      ],
+    });
+    return vex;
+  }
+
+  test("a row, keys or data that is not an object is refused", async () => {
+    const vex = await engine();
+    try {
+      const id = await vex.mutate("w.call", {
+        op: "insert",
+        a: { owner: "alice", note: "a1" },
+      });
+      for (const bad of [null, "owner", 5, ["owner"]]) {
+        await refused(
+          () => vex.mutate("w.call", { op: "insert", a: bad }),
+          /insert\(row\) must be an object/,
+        );
+        await refused(
+          () => vex.mutate("w.call", { op: "update", a: id, b: bad }),
+          /update\(…, data\) must be an object/,
+        );
+        await refused(
+          () => vex.mutate("w.call", { op: "upsert", a: bad, b: {} }),
+          /upsert\(keys\) must be an object/,
+        );
+        await refused(
+          () =>
+            vex.mutate("w.call", { op: "upsert", a: { owner: "x" }, b: bad }),
+          /upsert\(…, data\) must be an object/,
+        );
+      }
+      await refused(
+        () => vex.mutate("w.call", { op: "update", a: null, b: {} }),
+        /needs a row id/,
+      );
+    } finally {
+      await vex.close();
+    }
+  });
+
+  test("an upsert with no key is refused rather than overwriting a row", async () => {
+    const vex = await engine();
+    try {
+      await vex.mutate("w.call", {
+        op: "insert",
+        a: { owner: "alice", note: "a1" },
+      });
+      await refused(
+        () =>
+          vex.mutate("w.call", { op: "upsert", a: {}, b: { note: "gone" } }),
+        /needs a key/,
+      );
+      expect(await vex.unsafeSql<any>("SELECT note FROM notes")).toEqual([
+        { note: "a1" },
+      ]);
+    } finally {
+      await vex.close();
+    }
+  });
+});
+
+describe("sqlOver", () => {
+  test("a hold that is neither filters nor { where, reads } is refused", async () => {
+    const vex = await Vex.create({
+      storage: sqliteAdapter(":memory:"),
+      plugins: [
+        (api) => {
+          api.setName("o");
+          api.registerTable("notes", schema);
+          api.registerQuery("over", {
+            args: { hold: "json" },
+            reactive: false,
+            handler: (ctx, { hold }) =>
+              ctx.db.sqlOver({ notes: hold }, 'SELECT * FROM "notes"'),
+          });
+        },
+      ],
+    });
+    try {
+      for (const bad of [null, "x", 5, {}, { where: [] }, { reads: [] }]) {
+        await refused(() => vex.query("o.over", { hold: bad }), /hold/);
+      }
+      for (const bad of [[null], [{ column: "owner", operator: "LIKE" }]]) {
+        await refused(
+          () => vex.query("o.over", { hold: bad }),
+          /filter|operator/,
+        );
+      }
+      expect(await vex.query("o.over", { hold: [] })).toEqual([]);
+    } finally {
+      await vex.close();
+    }
+  });
+});
+
+describe("groupBy aggregates", () => {
+  test("aggregates that are not an object of definitions are refused", async () => {
+    for (const bad of [null, "count", ["count"], 5]) {
+      await refused(
+        async () =>
+          await adapter.query("notes").groupBy("owner", bad as any),
+        /aggregates must be an object/,
+      );
+    }
+  });
+});

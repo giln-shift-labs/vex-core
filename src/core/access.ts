@@ -57,6 +57,7 @@
 import {
   aggregate,
   filterOperator,
+  record,
   rowCount,
   sortDirection,
 } from "./args-error.js";
@@ -582,10 +583,12 @@ export function guardQueryBuilder(
             groupRows(
               await fetchAccepted(prepared, null, [
                 ...(Array.isArray(columns) ? columns : [columns]),
-                ...Object.values(aggs).flatMap((unchecked) => {
-                  const def = aggregate(unchecked);
-                  return def === "count" ? [] : [def[1]];
-                }),
+                ...Object.values(record(aggs, "groupBy's aggregates")).flatMap(
+                  (unchecked) => {
+                    const def = aggregate(unchecked);
+                    return def === "count" ? [] : [def[1]];
+                  },
+                ),
               ]),
               columns,
               aggs,
