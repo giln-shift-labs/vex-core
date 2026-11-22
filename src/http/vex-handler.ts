@@ -28,6 +28,11 @@
  *   collection of `(upgrade, open, message, close)` hooks the host
  *   plumbs into Bun.serve directly.
  *
+ * A call's body must say it is JSON (`requireJson`, body.ts): any other
+ * is refused 415 before it is parsed, and no call runs, so a page on
+ * another origin that posts a form cannot make a call with the
+ * cookies its browser holds for this one.
+ *
  * Bodies are read under a byte ceiling (body.ts): a request past
  * `maxBodyBytes` is answered 413 before it is buffered, and no handler
  * runs. Webhooks share the ceiling unless `maxWebhookBodyBytes` gives
@@ -40,7 +45,7 @@
 
 import type { Vex } from "../core/engine.js";
 import type { VexCalls, VexUser } from "../core/types.js";
-import { type ReadLimits, readText } from "./body.js";
+import { type ReadLimits, readText, requireJson } from "./body.js";
 import { errorMessage, isHttpError } from "./error.js";
 import { createRouter, type Router } from "./router.js";
 import type { Handler, RequestCtx } from "./types.js";
@@ -139,6 +144,7 @@ function makeCallHandler(
   limits: ReadLimits,
 ): Handler {
   return async (ctx: RequestCtx): Promise<Response> => {
+    await requireJson(ctx.req, limits);
     const { name, args } = parseCall(await bodyText(ctx, limits));
     if (!name) return json({ error: `Missing ${kind} name` }, 400);
     try {

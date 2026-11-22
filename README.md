@@ -482,6 +482,8 @@ POST /action             { name, args? }
 ALL  /webhook/*          user-defined webhooks
 ```
 
+A call's body must be sent as `Content-Type: application/json` (parameters such as `charset` allowed; `requireJson`, below). Any other type, or none, gets a 415 `{ "error": "Content-Type must be application/json" }` before the body is parsed, and no query, mutation or action runs. Webhooks are not calls and take any body.
+
 A query, mutation or action that throws an `HttpError` answers as it renders, its status, headers and body: a refusal reaches the caller as the 403 or 404 it is, with whatever its body carries (a `code`, the permission it lacked). Anything else thrown is a 500 carrying its message. The WebSocket's error frame carries the same: `{ type: "error", id, message, status?, body? }`, and `VexClient` rejects with a `VexCallError` holding `status` and `body`.
 
 `VexClient` reconnects a lost socket by itself, with backoff, and replays its subscriptions, so a view does not see the loss. Any close but `client.close()` is a loss, a clean one from a restarting server or a proxy included. A one-shot waiting when the socket dies rejects with `connection lost`, and is never sent later. The app can see the connection: `client.connection()` is `idle`, `connecting`, `open` or `reconnecting` (with `since`, when the connection was lost, `attempt`, and `nextAttemptAt`, or null while a try is under way), `client.onConnectionChange(listener)` reports each change on a microtask, and `client.reconnectNow()` tries at once instead of waiting out the backoff. A server down from the start reads as `reconnecting` too.
@@ -511,7 +513,7 @@ Request bodies are read under a byte ceiling: `vexHandler(vex, { maxBodyBytes, m
 ### Request bodies under a byte ceiling
 
 ```ts
-import { readBoundedBody, discardBody, readBody, readText, readJson, readForm, refuseBody } from "vex-core/http";
+import { readBoundedBody, discardBody, readBody, readText, readJson, readForm, refuseBody, requireJson, mediaType } from "vex-core/http";
 
 const read = await readBoundedBody(req, { maxBytes, drainBytes?, timeoutMs? });
 // { ok: true, bytes: Uint8Array } | { ok: false, status: 400 | 408 | 413, closeConnection }
@@ -520,7 +522,8 @@ const read = await readBoundedBody(req, { maxBytes, drainBytes?, timeoutMs? });
 - A declared `Content-Length` past `maxBytes` is refused before any bytes are read. An undeclared (chunked) body is counted as it streams and refused as soon as it passes the ceiling.
 - A refused body is drained up to `drainBytes` (default 4x `maxBytes`). That keeps a kept-alive socket clean, so the client reads the refusal instead of an ECONNRESET. If the body is past the drain ceiling, or past `timeoutMs` (one deadline covers both the read and the drain), `closeConnection` is true.
 - `discardBody(req, limits)` refuses a body without reading it in (wrong content type, etc.) under the same drain rule.
-- `readBody` / `readText` / `readJson` / `readForm` / `refuseBody` throw the `HttpError` that explains the refusal as `{ error }`, and add `Connection: close` exactly when bytes remain on the socket.
+- `readBody` / `readText` / `readJson` / `readForm` / `refuseBody` / `requireJson` throw the `HttpError` that explains the refusal as `{ error }`, and add `Connection: close` exactly when bytes remain on the socket.
+- A body is JSON only when it says so. `mediaType(headers)` is its media type alone, lowercased, parameters dropped (`""` when there is none). `requireJson(req, limits)` refuses, 415 and drained, a body whose media type is not `application/json`, and `readJson` reads only a body `requireJson` passes. A browser sends a `text/plain`, urlencoded or multipart POST to another origin without a CORS preflight, carrying its cookies for this one, and a JSON one only after the server allowed the preflight, so a page on another origin that merely posts cannot drive a route that reads JSON. `bodyParser` and `bearerAuth`'s login read a body's type by `mediaType` too.
 
 Web Streams only, so it runs in Bun and workerd alike.
 
@@ -533,7 +536,7 @@ Web Streams only, so it runs in Bun and workerd alike.
 | `accessLog({ logger, skipPaths })`          | One line per request: `GET /path -> 200 (12ms)`. |
 | `cors({ origin, credentials, allowedHeaders, maxAge })` | Fetch-standard CORS. Downgrades `*` to request origin when `credentials: true`. |
 | `bearerAuth({ token, publicPaths, loginPage })` | Single-token HTTP gate: `Authorization: Bearer` OR session cookie. Built-in `/login` + `/logout`; per-IP rate limit on failures. The login form is read under a 16 KiB / 10 s ceiling, and a refused form counts as a failure. |
-| `bodyParser({ limit, drainLimit, timeoutMs, json, urlencoded, text })` | Parse request body into `ctx.state.body`. `limit` is in bytes (default 1 MiB), enforced as the body streams; an oversized body gets a 413 and is drained. |
+| `bodyParser({ limit, drainLimit, timeoutMs, json, urlencoded, text })` | Parse request body into `ctx.state.body` by its `mediaType`: `application/json`, `application/x-www-form-urlencoded`, `text/*`. `limit` is in bytes (default 1 MiB), enforced as the body streams; an oversized body gets a 413 and is drained. |
 | `rateLimit({ requests, window, key, cost, limiter })` | Token-bucket limiting: 429 + `Retry-After`, full `X-RateLimit-*` on every response. Works as `use()` middleware or as a route-chain gate. |
 | `sessions({ storage, cookieName, maxAge, rolling })` | Server-side session store on any `StorageAdapter` (SQLite/custom). `ctx.session.get/set/delete/destroy`. |
 
@@ -571,14 +574,15 @@ content type by extension, support HEAD, and default to `no-cache`.
 Backed by any vex-core `StorageAdapter`. One row per session, cookie holds the id, data is a JSON blob with sliding expiry.
 
 ```ts
-import { sessions } from "vex-core/http";
+import { readJson, sessions } from "vex-core/http";
 import { sqliteAdapter } from "vex-core";
 
 const store = sqliteAdapter("./sessions.db");
 
 app.use(sessions({ storage: store, maxAge: 86400 * 7 }))
    .post("/login", async (ctx) => {
-     const { email } = (await ctx.req.json()) as { email: string };
+     // JSON only: a form another page posts is refused 415.
+     const { email } = await readJson(ctx.req, { maxBytes: 16 * 1024 });
      ctx.session?.set("email", email);
      return new Response("ok");
    })

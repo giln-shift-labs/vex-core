@@ -18,6 +18,7 @@ import { RateLimiter } from "../../core/rate-limit.js";
 import {
   type BodyLimits,
   type BodyRefusalStatus,
+  mediaType,
   readBoundedBody,
 } from "../body.js";
 import type { Middleware } from "../types.js";
@@ -299,19 +300,19 @@ type SubmittedToken =
   | { token: string | null }
   | { refused: BodyRefusalStatus; closeConnection: boolean };
 
-/** The token a login POST submits as a form or JSON; null for any
- *  other body. */
+/** The token a login POST submits as a form or JSON, by its media type
+ *  (`mediaType`); null for any other body. */
 async function readSubmittedToken(req: Request): Promise<SubmittedToken> {
   const read = await readBoundedBody(req, LOGIN_BODY_LIMITS);
   if (!read.ok) {
     return { refused: read.status, closeConnection: read.closeConnection };
   }
-  const contentType = req.headers.get("content-type") ?? "";
+  const type = mediaType(req.headers);
   const text = new TextDecoder().decode(read.bytes);
-  if (contentType.includes("application/x-www-form-urlencoded")) {
+  if (type === "application/x-www-form-urlencoded") {
     return { token: new URLSearchParams(text).get("token") };
   }
-  if (!contentType.includes("application/json")) return { token: null };
+  if (type !== "application/json") return { token: null };
   try {
     const body = JSON.parse(text) as { token?: unknown } | null;
     return {

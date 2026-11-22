@@ -2,9 +2,11 @@
  * Body parser middleware.
  *
  * Populates `ctx.state.body` (parsed) and `ctx.state.rawBody` (string)
- * based on Content-Type. Subsequent handlers read the already-parsed
- * body from state instead of re-awaiting req.json(), which matters
- * because Request bodies can only be consumed once.
+ * by the body's media type (`mediaType`, ../body.ts), so
+ * `application/json` is JSON and `application/jsonp` is not.
+ * Subsequent handlers read the already-parsed body from state instead
+ * of re-awaiting req.json(), which matters because Request bodies can
+ * only be consumed once.
  *
  * Respects a size limit in bytes (default 1 MiB), read through the
  * bounded body reader (../body.ts): a declared `Content-Length` past
@@ -20,6 +22,7 @@
 
 import {
   declaredLength,
+  mediaType,
   type ReadLimits,
   readText,
   refuseBody,
@@ -67,10 +70,9 @@ export function bodyParser(options: BodyParserOptions = {}): Middleware {
       return next();
     }
 
-    const contentType =
-      ctx.req.headers.get("content-type")?.toLowerCase() ?? "";
+    const type = mediaType(ctx.req.headers);
 
-    if (parseJson && contentType.startsWith("application/json")) {
+    if (parseJson && type === "application/json") {
       const raw = await readText(ctx.req, limits);
       ctx.state.rawBody = raw;
       try {
@@ -81,10 +83,7 @@ export function bodyParser(options: BodyParserOptions = {}): Middleware {
       return next();
     }
 
-    if (
-      parseUrl &&
-      contentType.startsWith("application/x-www-form-urlencoded")
-    ) {
+    if (parseUrl && type === "application/x-www-form-urlencoded") {
       const raw = await readText(ctx.req, limits);
       ctx.state.rawBody = raw;
       const parsed: Record<string, string> = {};
@@ -93,7 +92,7 @@ export function bodyParser(options: BodyParserOptions = {}): Middleware {
       return next();
     }
 
-    if (parseText && contentType.startsWith("text/")) {
+    if (parseText && type.startsWith("text/")) {
       const raw = await readText(ctx.req, limits);
       ctx.state.rawBody = raw;
       ctx.state.body = raw;
