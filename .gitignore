@@ -14,9 +14,8 @@ node_modules/
 # Build output
 dist
 
-# Bun
+# Bun (bun.lock is committed; the binary lockfile is not used)
 bun.lockb
-bun.lock
 
 # dotenv
 .env

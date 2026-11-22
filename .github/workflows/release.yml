@@ -16,7 +16,7 @@ jobs:
 
       - uses: oven-sh/setup-bun@v2
 
-      - run: bun install
+      - run: bun install --frozen-lockfile
 
       - name: Typecheck
         run: bun run typecheck
@@ -43,7 +43,7 @@ jobs:
 
       - uses: oven-sh/setup-bun@v2
 
-      - run: bun install
+      - run: bun install --frozen-lockfile
 
       - name: Build
         run: bun run build
