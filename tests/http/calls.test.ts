@@ -103,6 +103,7 @@ afterAll(async () => {
 async function post(path: string, body: unknown) {
   const res = await fetch(`http://localhost:${server.port}${path}`, {
     method: "POST",
+    headers: { "content-type": "application/json" },
     body: JSON.stringify(body),
   });
   return { status: res.status, body: await res.json() };

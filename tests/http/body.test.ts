@@ -359,6 +359,7 @@ describe("vexHandler", () => {
   });
 
   const json = (body: unknown) => JSON.stringify(body);
+  const asJson = { "content-type": "application/json" };
 
   test("the default ceiling is 8 MiB", () => {
     expect(DEFAULT_MAX_BODY_BYTES).toBe(8 * 1024 * 1024);
@@ -370,7 +371,7 @@ describe("vexHandler", () => {
       const res = await app.handle(
         post(
           json({ name: "echo.size", args: { text: "abc" } }),
-          {},
+          asJson,
           `http://x/${verb}`,
         ),
       );
@@ -383,13 +384,13 @@ describe("vexHandler", () => {
     const app = vexHandler(vex, { maxBodyBytes: 256 });
     for (const verb of ["query", "mutate"]) {
       const big = json({ name: "echo.size", args: { text: "x".repeat(500) } });
-      const declared = await app.handle(post(big, {}, `http://x/${verb}`));
+      const declared = await app.handle(post(big, asJson, `http://x/${verb}`));
       expect(declared.status).toBe(413);
       expect(await declared.json()).toEqual({
         error: "The request body exceeds the 256B limit",
       });
       const streamed = await app.handle(
-        post(chunked(300), {}, `http://x/${verb}`),
+        post(chunked(300), asJson, `http://x/${verb}`),
       );
       expect(streamed.status).toBe(413);
     }
@@ -397,11 +398,11 @@ describe("vexHandler", () => {
 
   test("a body that names no call answers the missing-name 400", async () => {
     const app = vexHandler(vex);
-    const res = await app.handle(post("{", {}, "http://x/query"));
+    const res = await app.handle(post("{", asJson, "http://x/query"));
     expect(res.status).toBe(400);
     expect(await res.json()).toEqual({ error: "Missing query name" });
     for (const body of ["null", "[]", '{"name":42}', '{"name":""}']) {
-      const res = await app.handle(post(body, {}, "http://x/mutate"));
+      const res = await app.handle(post(body, asJson, "http://x/mutate"));
       expect(res.status).toBe(400);
       expect(await res.json()).toEqual({ error: "Missing mutation name" });
     }
@@ -410,7 +411,7 @@ describe("vexHandler", () => {
   test("a stalled body is a 408 when a timeout is set", async () => {
     const app = vexHandler(vex, { bodyTimeoutMs: 30 });
     const res = await app.handle(
-      post(stalling(new Uint8Array(4)), {}, "http://x/query"),
+      post(stalling(new Uint8Array(4)), asJson, "http://x/query"),
     );
     expect(res.status).toBe(408);
     expect(res.headers.get("connection")).toBe("close");
