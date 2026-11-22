@@ -7,12 +7,14 @@ export type {
 } from "./body.js";
 export {
   discardBody,
+  mediaType,
   readBody,
   readBoundedBody,
   readForm,
   readJson,
   readText,
   refuseBody,
+  requireJson,
 } from "./body.js";
 export { compose } from "./compose.js";
 export { HttpError, isHttpError } from "./error.js";

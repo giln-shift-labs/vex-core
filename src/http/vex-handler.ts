@@ -28,13 +28,10 @@
  *   collection of `(upgrade, open, message, close)` hooks the host
  *   plumbs into Bun.serve directly.
  *
- * A call's body must say it is JSON: `Content-Type: application/json`,
- * parameters allowed. Anything else is refused 415 before it is read,
- * and no call runs. A browser sends a `text/plain`, form or
- * multipart POST to another origin without a CORS preflight, and
- * with whatever cookie it holds for this one; a JSON body it sends
- * only after the server agreed to the preflight. So a cookie-backed
- * caller cannot be driven by a page that merely posts a form.
+ * A call's body must say it is JSON (`requireJson`, body.ts): any other
+ * is refused 415 before it is parsed, and no call runs, so a page on
+ * another origin that posts a form cannot make a call with the
+ * cookies its browser holds for this one.
  *
  * Bodies are read under a byte ceiling (body.ts): a request past
  * `maxBodyBytes` is answered 413 before it is buffered, and no handler
@@ -48,7 +45,7 @@
 
 import type { Vex } from "../core/engine.js";
 import type { VexCalls, VexUser } from "../core/types.js";
-import { type ReadLimits, readText, refuseBody } from "./body.js";
+import { type ReadLimits, readText, requireJson } from "./body.js";
 import { errorMessage, isHttpError } from "./error.js";
 import { createRouter, type Router } from "./router.js";
 import type { Handler, RequestCtx } from "./types.js";
@@ -147,9 +144,7 @@ function makeCallHandler(
   limits: ReadLimits,
 ): Handler {
   return async (ctx: RequestCtx): Promise<Response> => {
-    if (!saysJson(ctx.req)) {
-      await refuseBody(ctx.req, limits, 415, NOT_JSON);
-    }
+    await requireJson(ctx.req, limits);
     const { name, args } = parseCall(await bodyText(ctx, limits));
     if (!name) return json({ error: `Missing ${kind} name` }, 400);
     try {
@@ -220,16 +215,6 @@ function makeWebhookHandler(
 }
 
 // ─── helpers ─────────────────────────────────────────────────────────
-
-/** What a call whose body does not say it is JSON is told. */
-const NOT_JSON = "Content-Type must be application/json";
-
-/** Whether `req` says its body is JSON: its media type, parameters
- *  such as `charset` aside and in any case, is `application/json`. */
-function saysJson(req: Request): boolean {
-  const type = req.headers.get("content-type");
-  return type?.split(";")[0]?.trim().toLowerCase() === "application/json";
-}
 
 /**
  * The request body as text, read once under `limits`. Behind

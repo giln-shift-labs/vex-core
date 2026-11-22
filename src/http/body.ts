@@ -17,8 +17,15 @@
  *   - `readBoundedBody` / `discardBody` answer a result and never
  *     throw for a refusal; for callers that render their own response.
  *   - `readBody` / `readText` / `readJson` / `readForm` / `refuseBody`
- *     throw the HttpError that says why, `{ error }` in the body and
- *     `Connection: close` exactly when bytes stay on the socket.
+ *     / `requireJson` throw the HttpError that says why, `{ error }` in
+ *     the body and `Connection: close` exactly when bytes stay on the
+ *     socket.
+ *
+ * A body is JSON only when it says so (`requireJson`): a browser sends
+ * a `text/plain`, urlencoded or multipart POST to another origin
+ * without a CORS preflight, carrying its cookies for this one, and a
+ * JSON one only after the server allowed the preflight. Reading such a
+ * body as JSON would let any page that posts a form make the call.
  *
  * Web Streams only (no Node `Buffer`), so it runs in Bun and workerd
  * alike.
@@ -95,6 +102,14 @@ async function drain(
   }
   if (!clean) void reader.cancel().catch(() => {});
   return clean;
+}
+
+/** The media type `headers` give their body, lowercased and without
+ *  parameters: `"application/json"` for `Application/JSON; charset=utf-8`,
+ *  `""` when there is none. */
+export function mediaType(headers: Headers): string {
+  const [essence = ""] = (headers.get("content-type") ?? "").split(";");
+  return essence.trim().toLowerCase();
 }
 
 /** `req`'s declared `Content-Length`: null when absent, "invalid" when
@@ -266,9 +281,24 @@ export async function readText(
   return new TextDecoder().decode(await readBody(req, limits));
 }
 
+const NOT_JSON = "Content-Type must be application/json";
+
+/** Refuse `req`, 415 with its body drained, unless it says its body is
+ *  JSON: media type `application/json`, parameters and case aside. */
+export async function requireJson(
+  req: Request,
+  limits: BodyLimits,
+): Promise<void> {
+  if (mediaType(req.headers) !== "application/json") {
+    await refuseBody(req, limits, 415, NOT_JSON);
+  }
+}
+
 /** `req`'s JSON body; `{}` when it is empty or does not parse. A body
- *  past the ceiling is refused, never read as `{}`. */
+ *  that does not say it is JSON is refused (`requireJson`), and one past
+ *  the ceiling too: neither is ever read as `{}`. */
 export async function readJson(req: Request, limits: ReadLimits): Promise<any> {
+  await requireJson(req, limits);
   const text = await readText(req, limits);
   try {
     return JSON.parse(text);

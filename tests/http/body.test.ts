@@ -13,7 +13,8 @@
  *
  * The helpers: a refusal is the HttpError that says why, in
  * `{ error }`, carrying `Connection: close` exactly when bytes stay on
- * the socket.
+ * the socket. A body is JSON only when its media type says so
+ * (`mediaType`, `requireJson`), at every site that reads one.
  *
  * The sites: vexHandler's /query, /mutate and /webhook/*, bodyParser
  * (bytes, not UTF-16 units; chunked bodies counted as they stream),
@@ -31,14 +32,18 @@ import {
   DEFAULT_MAX_BODY_BYTES,
   discardBody,
   HttpError,
+  mediaType,
   readBody,
   readBoundedBody,
   readForm,
   readJson,
   readText,
   refuseBody,
+  requireJson,
   vexHandler,
 } from "../../src/http/index.js";
+
+const asJson = { "content-type": "application/json" };
 
 function post(
   body: BodyInit | null,
@@ -287,13 +292,61 @@ describe("helpers", () => {
     );
   });
 
+  test("mediaType is the type alone, lowercased, and empty when there is none", () => {
+    const of = (type?: string) =>
+      mediaType(
+        new Headers(type === undefined ? {} : { "content-type": type }),
+      );
+    expect(of("application/json")).toBe("application/json");
+    expect(of(" Application/JSON ; charset=UTF-8")).toBe("application/json");
+    expect(of("text/plain; application/json")).toBe("text/plain");
+    expect(of("multipart/form-data; boundary=x")).toBe("multipart/form-data");
+    expect(of("")).toBe("");
+    expect(of()).toBe("");
+  });
+
+  test("requireJson passes a body that says it is JSON, and refuses any other 415, drained", async () => {
+    const limits = { maxBytes: 10 };
+    await requireJson(
+      post("{}", { "content-type": "application/json; charset=utf-8" }),
+      limits,
+    );
+    for (const type of [
+      "text/plain",
+      "application/jsonp",
+      "text/plain; application/json",
+    ]) {
+      const error = await refusal(
+        requireJson(post(chunked(30), { "content-type": type }), limits),
+      );
+      expect(error.status).toBe(415);
+      expect(error.body).toEqual({
+        error: "Content-Type must be application/json",
+      });
+      expect(error.headers.connection).toBeUndefined();
+    }
+    expect(
+      (await refusal(requireJson(post(new Uint8Array(2)), limits))).status,
+    ).toBe(415);
+  });
+
   test("readJson parses, answers {} for nothing parseable, and refuses past its ceiling", async () => {
     const limits = { maxBytes: 64 };
-    expect(await readJson(post('{"a":1}'), limits)).toEqual({ a: 1 });
-    expect(await readJson(post("{"), limits)).toEqual({});
-    expect(await readJson(post(null), limits)).toEqual({});
-    const error = await refusal(readJson(post(chunked(65)), limits));
+    expect(await readJson(post('{"a":1}', asJson), limits)).toEqual({ a: 1 });
+    expect(await readJson(post("{", asJson), limits)).toEqual({});
+    expect(await readJson(post(null, asJson), limits)).toEqual({});
+    const error = await refusal(readJson(post(chunked(65), asJson), limits));
     expect(error.status).toBe(413);
+  });
+
+  test("readJson refuses a body that does not say it is JSON, never reading it as {}", async () => {
+    const limits = { maxBytes: 64 };
+    for (const headers of [{ "content-type": "text/plain" }, {}]) {
+      const error = await refusal(
+        readJson(post(new TextEncoder().encode('{"a":1}'), headers), limits),
+      );
+      expect(error.status).toBe(415);
+    }
   });
 
   test("readForm reads a multipart body under its ceiling, and null for anything else", async () => {
@@ -359,7 +412,6 @@ describe("vexHandler", () => {
   });
 
   const json = (body: unknown) => JSON.stringify(body);
-  const asJson = { "content-type": "application/json" };
 
   test("the default ceiling is 8 MiB", () => {
     expect(DEFAULT_MAX_BODY_BYTES).toBe(8 * 1024 * 1024);
@@ -420,18 +472,17 @@ describe("vexHandler", () => {
   test("behind bodyParser, the body it already read is used for calls and webhooks", async () => {
     hooked.length = 0;
     const app = createRouter().use(bodyParser()).mount("/vex", vexHandler(vex));
-    const headers = { "content-type": "application/json" };
     const res = await app.handle(
       post(
         json({ name: "echo.size", args: { text: "abcd" } }),
-        headers,
+        asJson,
         "http://x/vex/query",
       ),
     );
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({ data: 4 });
     const hook = await app.handle(
-      post('{"b":2}', headers, "http://x/vex/webhook/hook"),
+      post('{"b":2}', asJson, "http://x/vex/webhook/hook"),
     );
     expect(await hook.json()).toEqual({ bytes: 7 });
     expect(hooked).toEqual(['{"b":2}']);
@@ -489,6 +540,17 @@ describe("bodyParser", () => {
       post(emoji, { "content-type": "text/plain" }),
     );
     expect(await at.json()).toEqual({ body: emoji });
+  });
+
+  test("only application/json is parsed as JSON", async () => {
+    const res = await app(100).handle(
+      post('{"a":1}', { "content-type": "application/jsonp" }),
+    );
+    expect(await res.json()).toEqual({ body: null });
+    const typed = await app(100).handle(
+      post('{"a":1}', { "content-type": "Application/JSON; charset=utf-8" }),
+    );
+    expect(await typed.json()).toEqual({ body: { a: 1 } });
   });
 
   test("parses JSON and forms under the limit", async () => {
@@ -588,6 +650,15 @@ describe("bearerAuth login form", () => {
       login(chunked(17 * 1024), { "content-type": "text/plain" }),
     );
     expect(big.status).toBe(413);
+  });
+
+  test("a body that names JSON only in a parameter submits no token", async () => {
+    for (const type of ["text/plain; application/json", "application/jsonp"]) {
+      const res = await app().handle(
+        login(JSON.stringify({ token }), { "content-type": type }),
+      );
+      expect(res.status).toBe(401);
+    }
   });
 
   test("a non-string JSON token is a failed login, not a crash", async () => {

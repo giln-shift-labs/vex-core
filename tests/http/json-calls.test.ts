@@ -3,8 +3,8 @@
  *
  * A browser sends a `text/plain`, urlencoded or multipart POST to
  * another origin without a CORS preflight, carrying whatever cookie it
- * holds for this one. `/query`, `/mutate` and `/action` parsed any body
- * as JSON, so such a request ran the call. Now:
+ * holds for this one, so `/query`, `/mutate` and `/action` read only a
+ * body that says it is JSON:
  *   - a body whose Content-Type is not `application/json` is a 415, and
  *     no query, mutation or action runs
  *   - `application/json` with parameters, in any case, is a call
