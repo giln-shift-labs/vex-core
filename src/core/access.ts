@@ -185,11 +185,13 @@ function sumOf(values: any[]): number | null {
 
 function minOf(values: any[]): any {
   if (values.length === 0) return null;
+  // biome-ignore lint/complexity/useMathMinMax: values may be text, which Math.min reads as NaN; SQL's MIN compares them as text
   return values.reduce((a, b) => (b < a ? b : a));
 }
 
 function maxOf(values: any[]): any {
   if (values.length === 0) return null;
+  // biome-ignore lint/complexity/useMathMinMax: values may be text, which Math.max reads as NaN; SQL's MAX compares them as text
   return values.reduce((a, b) => (b > a ? b : a));
 }
 
