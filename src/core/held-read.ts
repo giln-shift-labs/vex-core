@@ -79,14 +79,8 @@ function qualified(table: string): RegExp {
  */
 function heldTo(hold: unknown): { where: Filter[]; reads: string[] | null } {
   if (Array.isArray(hold)) return { where: hold, reads: null };
-  if (
-    hold !== null &&
-    typeof hold === "object" &&
-    Array.isArray((hold as any).where) &&
-    Array.isArray((hold as any).reads)
-  ) {
-    return hold as { where: Filter[]; reads: string[] };
-  }
+  const { where, reads } = (hold ?? {}) as { where?: unknown; reads?: unknown };
+  if (Array.isArray(where) && Array.isArray(reads)) return { where, reads };
   throw new ArgsError(
     "A hold is an array of filters or { where: filters, reads: columns }",
   );
