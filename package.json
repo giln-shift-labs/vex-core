@@ -57,6 +57,7 @@
     "lint": "bunx biome lint src/",
     "check": "bunx biome check src/",
     "typecheck": "tsc --noEmit && tsc -p tests/types",
+    "security:advisories": "bun run scripts/check-new-advisories.ts",
     "prepublishOnly": "bun run typecheck && bun run build"
   },
   "keywords": [

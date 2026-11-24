@@ -21,6 +21,18 @@ jobs:
 
       - run: bun install --frozen-lockfile
 
+      # Blocks a change that adds a critical or high advisory to
+      # bun.lock and warns on moderate or low. Advisories main already
+      # has are not this change's: the script compares against the base
+      # commit. Named for Dependabot; it runs `bun audit`, which reads
+      # the same GitHub advisory database Dependabot does.
+      - name: dependabot
+        env:
+          AUDIT_BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: |
+          git fetch --no-tags --depth=1 origin "$AUDIT_BASE_SHA"
+          bun run security:advisories
+
       - name: Typecheck
         run: bun run typecheck
 
